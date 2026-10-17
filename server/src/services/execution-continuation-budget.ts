@@ -220,15 +220,17 @@ export function boundExecutionContinuationEnvelope<
   }
 
   // Last resort: leftover ids/objective can still exceed the budget after
-  // messages and sidecars are gone. Keep shrinking the returned object.
+  // messages and sidecars are gone. Drop deleted-comment ids before pending
+  // interaction ids — native replacement treats an empty pending list as
+  // "no unanswered card" and can start a fresh run.
   while (overBudget(true)) {
-    if (unresolvedInteractionIds && unresolvedInteractionIds.length > 0) {
-      unresolvedInteractionIds = [];
+    if (omittedDeletedIds && omittedDeletedIds.length > 0) {
+      omittedDeletedIds = null;
       sidecarsTrimmed = true;
       continue;
     }
-    if (omittedDeletedIds && omittedDeletedIds.length > 0) {
-      omittedDeletedIds = null;
+    if (unresolvedInteractionIds && unresolvedInteractionIds.length > 1) {
+      unresolvedInteractionIds = unresolvedInteractionIds.slice(0, 1);
       sidecarsTrimmed = true;
       continue;
     }
@@ -244,6 +246,11 @@ export function boundExecutionContinuationEnvelope<
     if (messages.length > 0) {
       messages = [];
       omittedCount += 1;
+      continue;
+    }
+    if (unresolvedInteractionIds && unresolvedInteractionIds.length > 0) {
+      unresolvedInteractionIds = [];
+      sidecarsTrimmed = true;
       continue;
     }
     break;

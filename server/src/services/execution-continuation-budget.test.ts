@@ -239,7 +239,46 @@ describe("execution continuation budget", () => {
     const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 1_200);
     expect(envelopeBytes(bounded)).toBeLessThanOrEqual(1_200);
     expect(bounded.coverage.kind).toBe("truncated_task_history");
-    expect(bounded.unresolvedInteractionIds ?? []).toEqual([]);
+    expect(bounded.unresolvedInteractionIds).toEqual(["pending-0"]);
     expect(bounded.coverage.omittedDeletedIds).toBeUndefined();
+  });
+
+  it("drops deleted-comment ids before pending interaction ids", () => {
+    const origin = continuationMessage("origin", "trigger");
+    const pendingId = "40416c31-0000-4000-8000-000000000001";
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [origin],
+      interactionOutcomes: [],
+      completedWork: null,
+      unresolvedInteractionIds: [pendingId],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+        omittedDeletedIds: Array.from({ length: 400 }, (_, index) => `deleted-${index}`),
+      },
+    };
+    const withoutDeletedIds = {
+      ...envelope,
+      coverage: {
+        ...envelope.coverage,
+        omittedDeletedIds: undefined,
+      },
+    };
+    expect(envelopeBytes(envelope)).toBeGreaterThan(1_200);
+    expect(envelopeBytes(withoutDeletedIds)).toBeLessThanOrEqual(1_200);
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 1_200);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(1_200);
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+    expect(bounded.coverage.omittedDeletedIds).toBeUndefined();
+    expect(bounded.unresolvedInteractionIds).toEqual([pendingId]);
+    expect(bounded.messages.map((message) => message.id)).toEqual(["origin"]);
+    expect(bounded.objective).toBe("Do the work.");
   });
 });
