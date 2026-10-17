@@ -138,4 +138,81 @@ describe("execution continuation budget", () => {
     expect(bounded.coverage.omittedCount).toBeDefined();
     expect(bounded.completedWork).toBeNull();
   });
+
+  it("marks sidecar-only trims as truncated even with no comments dropped", () => {
+    const origin = continuationMessage("origin", "trigger");
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [origin],
+      completedWork: "w".repeat(4_000),
+      completedActions: [
+        { runId: "run", receiptId: "r", operationId: "op", result: { blob: "c".repeat(4_000) } },
+      ],
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+      },
+    };
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 2_000);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(2_000);
+    expect(bounded.messages.map((message) => message.id)).toEqual(["origin"]);
+    expect(bounded.completedWork).toBeNull();
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+  });
+
+  it("counts both copies when estimating a duplicated non-origin drop", () => {
+    const origin = continuationMessage("origin", "o".repeat(200));
+    const first = continuationMessage("first", "a".repeat(18_000));
+    const second = continuationMessage("second", "b".repeat(18_000));
+    const third = continuationMessage("third", "c".repeat(18_000));
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [first, second, third, origin],
+      resumeDelta: { baseRunId: "run", messages: [first, second, third, origin] },
+      interactionOutcomes: [],
+      completedWork: null,
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+      },
+    };
+    const afterOneDrop = {
+      ...envelope,
+      messages: [second, third, origin],
+      resumeDelta: { baseRunId: "run", messages: [second, third, origin] },
+      coverage: {
+        ...envelope.coverage,
+        kind: "truncated_task_history" as const,
+        omittedCount: 1,
+        oldestRetainedCommentId: "second",
+        throughCommentId: "origin",
+      },
+    };
+    const afterOneDropBytes = envelopeBytes(afterOneDrop);
+    expect(afterOneDropBytes).toBeLessThan(80_000);
+    expect(envelopeBytes(envelope)).toBeGreaterThan(80_000);
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 80_000);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(80_000);
+    expect(bounded.messages.map((message) => message.id)).toEqual(["second", "third", "origin"]);
+    expect(bounded.resumeDelta?.messages.map((message) => message.id)).toEqual([
+      "second",
+      "third",
+      "origin",
+    ]);
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+  });
 });

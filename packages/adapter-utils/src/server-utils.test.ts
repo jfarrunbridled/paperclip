@@ -1026,6 +1026,35 @@ describe("renderPaperclipWakePrompt", () => {
     }
   });
 
+  it("renders a coverage-less continuation without throwing", () => {
+    const message = {
+      id: "wake",
+      authorType: "user",
+      authorId: "board",
+      body: "NEW_SLACK_MESSAGE",
+      createdAt: "2026-10-16T00:00:00.000Z",
+      updatedAt: "2026-10-16T00:00:00.000Z",
+      deleted: false,
+      sourceTrust: "user",
+    };
+    const prompt = renderPaperclipWakePrompt(
+      {
+        reason: "External chat message received",
+        issue: { id: "issue-1" },
+        executionContinuation: {
+          version: 1,
+          objective: message.body,
+          messages: [message],
+          resumeDelta: { baseRunId: "run-1", messages: [message] },
+        },
+      },
+      { resumedSession: true },
+    );
+    expect(prompt).toContain("NEW_SLACK_MESSAGE");
+    expect(prompt).toContain("These are new or edited messages since the named run");
+    expect(prompt).not.toContain("History was truncated to fit the wake payload");
+  });
+
   it.each([false, true])("renders the runtime checkout flag for ordinary task wakes (resume=%s)", resumedSession => {
     const payload = { reason: "issue_assigned", issue: { id: "issue-1", status: "in_progress" },
       comments: [], commentWindow: { requestedCount: 0, includedCount: 0, missingCount: 0 },

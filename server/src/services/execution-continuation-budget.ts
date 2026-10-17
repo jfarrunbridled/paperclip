@@ -73,6 +73,7 @@ export function boundExecutionContinuationEnvelope<
   let resumeMessages = envelope.resumeDelta?.messages.slice() ?? null;
   let omittedCount = 0;
   let emptiedOriginBodies = false;
+  let sidecarsTrimmed = false;
   let completedWork = envelope.completedWork ?? null;
   let completedActions = envelope.completedActions?.slice() ?? null;
   let interactionOutcomes = envelope.interactionOutcomes?.slice() ?? null;
@@ -80,10 +81,11 @@ export function boundExecutionContinuationEnvelope<
   let humanResponses = envelope.humanResponses?.slice() ?? null;
   const objective = capExecutionContinuationObjective(envelope.objective);
 
+  const wasTruncated = () =>
+    omittedCount > 0 || emptiedOriginBodies || sidecarsTrimmed || objective !== envelope.objective;
+
   const apply = (includeTruncationMeta: boolean): TEnvelope => {
-    const truncated =
-      includeTruncationMeta &&
-      (omittedCount > 0 || emptiedOriginBodies || objective !== envelope.objective);
+    const truncated = includeTruncationMeta && wasTruncated();
     return {
       ...envelope,
       objective,
@@ -155,22 +157,27 @@ export function boundExecutionContinuationEnvelope<
   const trimSidecar = (): boolean => {
     if (typeof completedWork === "string" && completedWork.length > 0) {
       completedWork = null;
+      sidecarsTrimmed = true;
       return true;
     }
     if (completedActions && completedActions.length > 0) {
       completedActions = [];
+      sidecarsTrimmed = true;
       return true;
     }
     if (recoveryOutcomes && recoveryOutcomes.length > 0) {
       recoveryOutcomes = [];
+      sidecarsTrimmed = true;
       return true;
     }
     if (humanResponses && humanResponses.length > 0) {
       humanResponses = [];
+      sidecarsTrimmed = true;
       return true;
     }
     if (interactionOutcomes && interactionOutcomes.length > 0) {
       interactionOutcomes = [];
+      sidecarsTrimmed = true;
       return true;
     }
     return false;
@@ -186,7 +193,11 @@ export function boundExecutionContinuationEnvelope<
   while (estimated > budgetBytes) {
     const dropIndex = firstNonOriginIndex(messages, originSet);
     if (dropIndex < 0) break;
-    estimated -= continuationUtf8Bytes(messages[dropIndex]);
+    const dropped = messages[dropIndex]!;
+    estimated -= continuationUtf8Bytes(dropped);
+    if (resumeMessages?.some((message) => message.id === dropped.id)) {
+      estimated -= continuationUtf8Bytes(dropped);
+    }
     dropNonOriginFromHistory();
   }
 
@@ -198,5 +209,5 @@ export function boundExecutionContinuationEnvelope<
     break;
   }
 
-  return apply(omittedCount > 0 || emptiedOriginBodies || objective !== envelope.objective);
+  return apply(wasTruncated());
 }
