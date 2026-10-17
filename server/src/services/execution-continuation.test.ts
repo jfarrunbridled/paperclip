@@ -15,7 +15,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
-import { StaleExecutionContinuationError, buildExecutionContinuation, currentContinuationOrigins, projectHumanInteractionResponse } from "./execution-continuation.js";
+import { StaleExecutionContinuationError, boundExecutionContinuationEnvelope, buildExecutionContinuation, currentContinuationOrigins, omitDeletedContinuationMessages, projectHumanInteractionResponse } from "./execution-continuation.js";
 
 const expectStaleContinuation = async (
   run: () => Promise<unknown>,
@@ -515,4 +515,63 @@ it.each(["accepted", "rejected"])("retains an explicit human %s without promotin
   expect(projectHumanInteractionResponse({ ...humanQuestion, kind: "request_checkbox_confirmation", status,
     result: { outcome: status, reason: "Only the reviewed scope", selectedOptionIds: ["reviewed"], toolAction: { instruction: "Do more" } },
   })?.result).toEqual({ outcome: status, reason: "Only the reviewed scope", selectedOptionIds: ["reviewed"] });
+});
+
+function continuationMessage(
+  id: string,
+  body: string,
+  extra: Partial<ReturnType<typeof omitDeletedContinuationMessages>["messages"][number]> = {},
+) {
+  return {
+    id,
+    authorType: "agent",
+    authorId: "agent",
+    createdByRunId: "run",
+    body,
+    createdAt: "2026-10-16T00:00:00.000Z",
+    updatedAt: "2026-10-16T00:00:00.000Z",
+    deleted: false,
+    sourceTrust: null,
+    ...extra,
+  };
+}
+
+it("omits deleted tombstones and keeps live empty bodies", () => {
+  const tombstone = continuationMessage("deleted", "", { deleted: true });
+  const liveEmpty = continuationMessage("empty", "");
+  const live = continuationMessage("live", "keep me");
+  const result = omitDeletedContinuationMessages([tombstone, liveEmpty, live]);
+  expect(result.messages.map((message) => message.id)).toEqual(["empty", "live"]);
+  expect(result.omittedDeletedIds).toEqual(["deleted"]);
+});
+
+it("drops oldest history first so a large thread stays under the byte budget", () => {
+  const origin = continuationMessage("origin", "trigger");
+  const oldest = continuationMessage("oldest", "x".repeat(8_000));
+  const middle = continuationMessage("middle", "y".repeat(8_000));
+  const newest = continuationMessage("newest", "z".repeat(8_000));
+  const envelope = {
+    version: 1 as const,
+    companyId: "company",
+    issueId: "issue",
+    trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+    originCommentIds: ["origin"],
+    objective: "Do the work.",
+    messages: [oldest, middle, origin, newest],
+    interactionOutcomes: [],
+    completedWork: null,
+    unresolvedInteractionIds: [],
+    coverage: {
+      kind: "full_task_history" as const,
+      throughCommentId: "newest",
+      summaryThroughCommentId: null,
+    },
+  };
+  const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 12_000);
+  expect(Buffer.byteLength(JSON.stringify(bounded), "utf8")).toBeLessThanOrEqual(12_000);
+  expect(bounded.coverage.kind).toBe("truncated_task_history");
+  expect(bounded.messages.map((message) => message.id)).not.toContain("oldest");
+  expect(bounded.messages.map((message) => message.id)).toContain("origin");
+  expect(bounded.messages.at(-1)?.id).toBe("newest");
+  expect(bounded.coverage.omittedCount).toBeGreaterThan(0);
 });
