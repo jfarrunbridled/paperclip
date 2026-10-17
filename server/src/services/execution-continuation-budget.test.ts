@@ -22,6 +22,10 @@ function continuationMessage(
   };
 }
 
+function envelopeBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
 describe("execution continuation budget", () => {
   it("omits deleted tombstones and keeps live empty bodies", () => {
     const tombstone = continuationMessage("deleted", "", { deleted: true });
@@ -49,17 +53,89 @@ describe("execution continuation budget", () => {
       completedWork: null,
       unresolvedInteractionIds: [],
       coverage: {
-        kind: "full_task_history",
+        kind: "full_task_history" as const,
         throughCommentId: "newest",
         summaryThroughCommentId: null,
       },
     };
     const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 12_000);
-    expect(new TextEncoder().encode(JSON.stringify(bounded)).byteLength).toBeLessThanOrEqual(12_000);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(12_000);
     expect(bounded.coverage.kind).toBe("truncated_task_history");
     expect(bounded.messages.map((message) => message.id)).not.toContain("oldest");
     expect(bounded.messages.map((message) => message.id)).toContain("origin");
     expect(bounded.messages.at(-1)?.id).toBe("newest");
     expect(bounded.coverage.omittedCount).toBeGreaterThan(0);
+  });
+
+  it("drops duplicated non-origin history before blanking an origin wake comment", () => {
+    const origin = continuationMessage("origin", "o".repeat(5_000));
+    const extra = continuationMessage("extra", "e".repeat(4_000));
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [origin, extra],
+      resumeDelta: { baseRunId: "run", messages: [origin, extra] },
+      interactionOutcomes: [],
+      completedWork: null,
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "extra",
+        summaryThroughCommentId: null,
+      },
+    };
+    const fullBytes = envelopeBytes(envelope);
+    const originOnly = {
+      ...envelope,
+      messages: [origin],
+      resumeDelta: { baseRunId: "run", messages: [origin] },
+    };
+    const originOnlyBytes = envelopeBytes(originOnly);
+    expect(fullBytes).toBeGreaterThan(originOnlyBytes);
+    const budget = originOnlyBytes + 200;
+    expect(fullBytes).toBeGreaterThan(budget);
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], budget);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(budget);
+    expect(bounded.messages.map((message) => message.id)).toEqual(["origin"]);
+    expect(bounded.messages[0]?.body).toBe(origin.body);
+    expect(bounded.resumeDelta?.messages.map((message) => message.id)).toEqual(["origin"]);
+    expect(bounded.resumeDelta?.messages[0]?.body).toBe(origin.body);
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+  });
+
+  it("keeps the returned envelope under budget after truncation metadata and bulky sidecars", () => {
+    const origin = continuationMessage("origin", "trigger");
+    const extra = continuationMessage("extra", "x".repeat(3_000));
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [origin, extra],
+      interactionOutcomes: [
+        { id: "card", kind: "ask_user_questions", status: "answered", result: { a: "r".repeat(4_000) } },
+      ],
+      completedActions: [
+        { runId: "run", receiptId: "r", operationId: "op", result: { blob: "c".repeat(4_000) } },
+      ],
+      completedWork: "w".repeat(4_000),
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "extra",
+        summaryThroughCommentId: null,
+      },
+    };
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 6_000);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(6_000);
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+    expect(bounded.coverage.omittedCount).toBeDefined();
+    expect(bounded.completedWork).toBeNull();
   });
 });

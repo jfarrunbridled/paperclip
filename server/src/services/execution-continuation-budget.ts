@@ -19,7 +19,14 @@ export type ContinuationEnvelopeLike<TMessage extends ContinuationMessageLike> =
     oldestRetainedCommentId?: string | null;
     omittedDeletedIds?: string[];
   };
+  completedWork?: string | null;
+  completedActions?: unknown[];
+  interactionOutcomes?: unknown[];
+  recoveryOutcomes?: unknown[];
+  humanResponses?: unknown[];
 };
+
+const utf8 = new TextEncoder();
 
 export function omitDeletedContinuationMessages<TMessage extends ContinuationMessageLike>(
   messages: TMessage[],
@@ -43,7 +50,14 @@ export function capExecutionContinuationObjective(objective: string): string {
 }
 
 function continuationUtf8Bytes(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  return utf8.encode(JSON.stringify(value)).byteLength;
+}
+
+function firstNonOriginIndex<TMessage extends ContinuationMessageLike>(
+  list: TMessage[],
+  originSet: Set<string>,
+): number {
+  return list.findIndex((message) => !originSet.has(message.id));
 }
 
 export function boundExecutionContinuationEnvelope<
@@ -59,91 +73,130 @@ export function boundExecutionContinuationEnvelope<
   let resumeMessages = envelope.resumeDelta?.messages.slice() ?? null;
   let omittedCount = 0;
   let emptiedOriginBodies = false;
+  let completedWork = envelope.completedWork ?? null;
+  let completedActions = envelope.completedActions?.slice() ?? null;
+  let interactionOutcomes = envelope.interactionOutcomes?.slice() ?? null;
+  let recoveryOutcomes = envelope.recoveryOutcomes?.slice() ?? null;
+  let humanResponses = envelope.humanResponses?.slice() ?? null;
   const objective = capExecutionContinuationObjective(envelope.objective);
 
-  const apply = (): TEnvelope => ({
-    ...envelope,
-    objective,
-    messages,
-    ...(envelope.resumeDelta && resumeMessages
-      ? { resumeDelta: { ...envelope.resumeDelta, messages: resumeMessages } }
-      : {}),
-  });
-
-  let current = apply();
-  const overBudget = () => continuationUtf8Bytes(current) > budgetBytes;
-  const dropOldest = (
-    list: TMessage[],
-    preferNonOrigin: boolean,
-  ): { list: TMessage[]; dropped: boolean; emptied: boolean } => {
-    const dropIndex = preferNonOrigin
-      ? list.findIndex((message) => !originSet.has(message.id))
-      : -1;
-    if (dropIndex >= 0) {
-      return {
-        list: list.filter((_, index) => index !== dropIndex),
-        dropped: true,
-        emptied: false,
-      };
-    }
-    const bulkyIndex = list.findIndex((message) => message.body.length > 0);
-    if (bulkyIndex >= 0) {
-      return {
-        list: list.map((message, index) =>
-          index === bulkyIndex ? { ...message, body: "" } : message,
-        ),
-        dropped: true,
-        emptied: originSet.has(list[bulkyIndex]!.id),
-      };
-    }
-    return { list, dropped: false, emptied: false };
+  const apply = (includeTruncationMeta: boolean): TEnvelope => {
+    const truncated =
+      includeTruncationMeta &&
+      (omittedCount > 0 || emptiedOriginBodies || objective !== envelope.objective);
+    return {
+      ...envelope,
+      objective,
+      messages,
+      completedWork,
+      ...(completedActions ? { completedActions } : {}),
+      ...(interactionOutcomes ? { interactionOutcomes } : {}),
+      ...(recoveryOutcomes ? { recoveryOutcomes } : {}),
+      ...(humanResponses ? { humanResponses } : {}),
+      ...(envelope.resumeDelta && resumeMessages
+        ? { resumeDelta: { ...envelope.resumeDelta, messages: resumeMessages } }
+        : {}),
+      coverage: {
+        ...envelope.coverage,
+        kind: truncated ? "truncated_task_history" : envelope.coverage.kind,
+        throughCommentId: messages.at(-1)?.id ?? envelope.coverage.throughCommentId,
+        ...(truncated
+          ? {
+              omittedCount,
+              oldestRetainedCommentId: messages[0]?.id ?? null,
+            }
+          : {}),
+      },
+    };
   };
 
-  while (overBudget()) {
-    const fromHistory = dropOldest(messages, true);
-    if (fromHistory.dropped) {
-      if (fromHistory.list.length < messages.length) omittedCount += 1;
-      if (fromHistory.emptied) emptiedOriginBodies = true;
-      messages = fromHistory.list;
-      current = apply();
-      continue;
-    }
+  const overBudget = (includeTruncationMeta: boolean) =>
+    continuationUtf8Bytes(apply(includeTruncationMeta)) > budgetBytes;
+
+  const dropNonOriginFromHistory = (): boolean => {
+    const dropIndex = firstNonOriginIndex(messages, originSet);
+    if (dropIndex < 0) return false;
+    const droppedId = messages[dropIndex]!.id;
+    messages = messages.filter((_, index) => index !== dropIndex);
     if (resumeMessages) {
-      const fromDelta = dropOldest(resumeMessages, true);
-      if (fromDelta.dropped) {
-        if (fromDelta.list.length < resumeMessages.length) omittedCount += 1;
-        if (fromDelta.emptied) emptiedOriginBodies = true;
-        resumeMessages = fromDelta.list;
-        current = apply();
-        continue;
-      }
+      resumeMessages = resumeMessages.filter((message) => message.id !== droppedId);
     }
-    const fromOrigins = dropOldest(messages, false);
-    if (fromOrigins.dropped) {
-      if (fromOrigins.emptied) emptiedOriginBodies = true;
-      messages = fromOrigins.list;
-      current = apply();
-      continue;
+    omittedCount += 1;
+    return true;
+  };
+
+  const dropNonOriginFromDelta = (): boolean => {
+    if (!resumeMessages) return false;
+    const dropIndex = firstNonOriginIndex(resumeMessages, originSet);
+    if (dropIndex < 0) return false;
+    resumeMessages = resumeMessages.filter((_, index) => index !== dropIndex);
+    omittedCount += 1;
+    return true;
+  };
+
+  const emptyOldestOriginBody = (): boolean => {
+    const bulkyIndex = messages.findIndex(
+      (message) => originSet.has(message.id) && message.body.length > 0,
+    );
+    if (bulkyIndex < 0) return false;
+    const originId = messages[bulkyIndex]!.id;
+    messages = messages.map((message, index) =>
+      index === bulkyIndex ? { ...message, body: "" } : message,
+    );
+    if (resumeMessages) {
+      resumeMessages = resumeMessages.map((message) =>
+        message.id === originId ? { ...message, body: "" } : message,
+      );
     }
+    emptiedOriginBodies = true;
+    return true;
+  };
+
+  const trimSidecar = (): boolean => {
+    if (typeof completedWork === "string" && completedWork.length > 0) {
+      completedWork = null;
+      return true;
+    }
+    if (completedActions && completedActions.length > 0) {
+      completedActions = [];
+      return true;
+    }
+    if (recoveryOutcomes && recoveryOutcomes.length > 0) {
+      recoveryOutcomes = [];
+      return true;
+    }
+    if (humanResponses && humanResponses.length > 0) {
+      humanResponses = [];
+      return true;
+    }
+    if (interactionOutcomes && interactionOutcomes.length > 0) {
+      interactionOutcomes = [];
+      return true;
+    }
+    return false;
+  };
+
+  if (!overBudget(false)) {
+    return apply(false);
+  }
+
+  // Subtracting standalone message JSON slightly under-saves (array commas),
+  // which keeps the estimate conservative before the exact check below.
+  let estimated = continuationUtf8Bytes(apply(true));
+  while (estimated > budgetBytes) {
+    const dropIndex = firstNonOriginIndex(messages, originSet);
+    if (dropIndex < 0) break;
+    estimated -= continuationUtf8Bytes(messages[dropIndex]);
+    dropNonOriginFromHistory();
+  }
+
+  while (overBudget(true)) {
+    if (dropNonOriginFromHistory()) continue;
+    if (dropNonOriginFromDelta()) continue;
+    if (emptyOldestOriginBody()) continue;
+    if (trimSidecar()) continue;
     break;
   }
 
-  const truncated =
-    omittedCount > 0 ||
-    emptiedOriginBodies ||
-    objective !== envelope.objective;
-  return {
-    ...current,
-    coverage: {
-      ...current.coverage,
-      kind: truncated ? "truncated_task_history" : current.coverage.kind,
-      throughCommentId: messages.at(-1)?.id ?? current.coverage.throughCommentId,
-      ...(truncated
-        ? {
-            omittedCount,
-            oldestRetainedCommentId: messages[0]?.id ?? null,
-          }
-        : {}),
-    },
-  };
+  return apply(omittedCount > 0 || emptiedOriginBodies || objective !== envelope.objective);
 }

@@ -973,6 +973,59 @@ describe("runChildProcess", () => {
 });
 
 describe("renderPaperclipWakePrompt", () => {
+  it("does not call truncated continuation history complete", () => {
+    const executionContinuation = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue-1",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [{
+        id: "origin",
+        authorType: "agent",
+        authorId: "agent",
+        body: "trigger",
+        createdAt: "2026-10-16T00:00:00.000Z",
+        updatedAt: "2026-10-16T00:00:00.000Z",
+        deleted: false,
+        sourceTrust: null,
+      }],
+      resumeDelta: {
+        baseRunId: "run-1",
+        messages: [{
+          id: "origin",
+          authorType: "agent",
+          authorId: "agent",
+          body: "trigger",
+          createdAt: "2026-10-16T00:00:00.000Z",
+          updatedAt: "2026-10-16T00:00:00.000Z",
+          deleted: false,
+          sourceTrust: null,
+        }],
+      },
+      interactionOutcomes: [],
+      completedWork: null,
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "truncated_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+        omittedCount: 2,
+      },
+    };
+    for (const resumedSession of [false, true]) {
+      const prompt = renderPaperclipWakePrompt(
+        { reason: "issue_assigned", issue: { id: "issue-1" }, executionContinuation },
+        { resumedSession },
+      );
+      expect(prompt).toContain("History was truncated to fit the wake payload");
+      expect(prompt).toContain('"kind":"truncated_task_history"');
+      expect(prompt).not.toContain("History is complete through the coverage cursor");
+      expect(prompt).not.toContain('"kind":"task_history_delta"');
+    }
+  });
+
   it.each([false, true])("renders the runtime checkout flag for ordinary task wakes (resume=%s)", resumedSession => {
     const payload = { reason: "issue_assigned", issue: { id: "issue-1", status: "in_progress" },
       comments: [], commentWindow: { requestedCount: 0, includedCount: 0, missingCount: 0 },
