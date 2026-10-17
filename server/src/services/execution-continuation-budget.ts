@@ -24,6 +24,7 @@ export type ContinuationEnvelopeLike<TMessage extends ContinuationMessageLike> =
   interactionOutcomes?: unknown[];
   recoveryOutcomes?: unknown[];
   humanResponses?: unknown[];
+  unresolvedInteractionIds?: string[];
 };
 
 const utf8 = new TextEncoder();
@@ -79,10 +80,15 @@ export function boundExecutionContinuationEnvelope<
   let interactionOutcomes = envelope.interactionOutcomes?.slice() ?? null;
   let recoveryOutcomes = envelope.recoveryOutcomes?.slice() ?? null;
   let humanResponses = envelope.humanResponses?.slice() ?? null;
-  const objective = capExecutionContinuationObjective(envelope.objective);
+  let unresolvedInteractionIds = envelope.unresolvedInteractionIds?.slice() ?? null;
+  let omittedDeletedIds = envelope.coverage.omittedDeletedIds?.slice() ?? null;
+  let objective = capExecutionContinuationObjective(envelope.objective);
 
   const wasTruncated = () =>
-    omittedCount > 0 || emptiedOriginBodies || sidecarsTrimmed || objective !== envelope.objective;
+    omittedCount > 0 ||
+    emptiedOriginBodies ||
+    sidecarsTrimmed ||
+    objective !== envelope.objective;
 
   const apply = (includeTruncationMeta: boolean): TEnvelope => {
     const truncated = includeTruncationMeta && wasTruncated();
@@ -95,6 +101,7 @@ export function boundExecutionContinuationEnvelope<
       ...(interactionOutcomes ? { interactionOutcomes } : {}),
       ...(recoveryOutcomes ? { recoveryOutcomes } : {}),
       ...(humanResponses ? { humanResponses } : {}),
+      ...(unresolvedInteractionIds ? { unresolvedInteractionIds } : {}),
       ...(envelope.resumeDelta && resumeMessages
         ? { resumeDelta: { ...envelope.resumeDelta, messages: resumeMessages } }
         : {}),
@@ -102,6 +109,9 @@ export function boundExecutionContinuationEnvelope<
         ...envelope.coverage,
         kind: truncated ? "truncated_task_history" : envelope.coverage.kind,
         throughCommentId: messages.at(-1)?.id ?? envelope.coverage.throughCommentId,
+        ...(omittedDeletedIds && omittedDeletedIds.length > 0
+          ? { omittedDeletedIds }
+          : { omittedDeletedIds: undefined }),
         ...(truncated
           ? {
               omittedCount,
@@ -206,6 +216,36 @@ export function boundExecutionContinuationEnvelope<
     if (dropNonOriginFromDelta()) continue;
     if (emptyOldestOriginBody()) continue;
     if (trimSidecar()) continue;
+    break;
+  }
+
+  // Last resort: leftover ids/objective can still exceed the budget after
+  // messages and sidecars are gone. Keep shrinking the returned object.
+  while (overBudget(true)) {
+    if (unresolvedInteractionIds && unresolvedInteractionIds.length > 0) {
+      unresolvedInteractionIds = [];
+      sidecarsTrimmed = true;
+      continue;
+    }
+    if (omittedDeletedIds && omittedDeletedIds.length > 0) {
+      omittedDeletedIds = null;
+      sidecarsTrimmed = true;
+      continue;
+    }
+    if (objective.length > 0) {
+      objective = "";
+      continue;
+    }
+    if (resumeMessages && resumeMessages.length > 0) {
+      resumeMessages = [];
+      omittedCount += 1;
+      continue;
+    }
+    if (messages.length > 0) {
+      messages = [];
+      omittedCount += 1;
+      continue;
+    }
     break;
   }
 
