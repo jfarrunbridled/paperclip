@@ -43,7 +43,7 @@ export function capExecutionContinuationObjective(objective: string): string {
 }
 
 function continuationUtf8Bytes(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value), "utf8");
+  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
 export function boundExecutionContinuationEnvelope<
@@ -53,7 +53,7 @@ export function boundExecutionContinuationEnvelope<
   envelope: TEnvelope,
   originCommentIds: string[],
   budgetBytes = MAX_EXECUTION_CONTINUATION_JSON_BYTES,
-): TEnvelope {
+): TEnvelope & ContinuationEnvelopeLike<TMessage> {
   const originSet = new Set(originCommentIds);
   let messages = envelope.messages.slice();
   let resumeMessages = envelope.resumeDelta?.messages.slice() ?? null;

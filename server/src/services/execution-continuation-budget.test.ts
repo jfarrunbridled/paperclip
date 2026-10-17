@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   boundExecutionContinuationEnvelope,
   omitDeletedContinuationMessages,
-} from "./execution-continuation-budget.ts";
+} from "./execution-continuation-budget.js";
 
 function continuationMessage(
   id: string,
@@ -55,7 +55,7 @@ test("drops oldest history first so a large thread stays under the byte budget",
     },
   };
   const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 12_000);
-  assert.ok(Buffer.byteLength(JSON.stringify(bounded), "utf8") <= 12_000);
+  assert.ok(new TextEncoder().encode(JSON.stringify(bounded)).byteLength <= 12_000);
   assert.equal(bounded.coverage.kind, "truncated_task_history");
   assert.equal(bounded.messages.some((message) => message.id === "oldest"), false);
   assert.equal(bounded.messages.some((message) => message.id === "origin"), true);
