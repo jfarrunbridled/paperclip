@@ -448,12 +448,18 @@ export async function buildExecutionContinuation(input: {
       lastTerminal.status === "interrupted" || lastTerminal.errorCode === "process_lost")
     ? lastTerminal.id : undefined);
   const liveMessages = omitDeletedContinuationMessages(messages);
-  const liveResumeDelta = resumeDelta
-    ? {
-        ...resumeDelta,
-        messages: omitDeletedContinuationMessages(resumeDelta.messages).messages,
-      }
+  const liveResumeMessages = resumeDelta
+    ? omitDeletedContinuationMessages(resumeDelta.messages)
     : undefined;
+  const liveResumeDelta = liveResumeMessages
+    ? { ...resumeDelta!, messages: liveResumeMessages.messages }
+    : undefined;
+  const omittedDeletedIds = Array.from(
+    new Set([
+      ...liveMessages.omittedDeletedIds,
+      ...(liveResumeMessages?.omittedDeletedIds ?? []),
+    ]),
+  );
   const envelope: ExecutionContinuationEnvelope = {
     ...(interruptedRunId ? { interruptedRunId } : {}),
     ...(liveResumeDelta ? { resumeDelta: liveResumeDelta } : {}),
@@ -501,9 +507,7 @@ export async function buildExecutionContinuation(input: {
       kind: "full_task_history",
       throughCommentId: liveMessages.messages.at(-1)?.id ?? null,
       summaryThroughCommentId: null,
-      ...(liveMessages.omittedDeletedIds.length > 0
-        ? { omittedDeletedIds: liveMessages.omittedDeletedIds }
-        : {}),
+      ...(omittedDeletedIds.length > 0 ? { omittedDeletedIds } : {}),
     },
   };
   return boundExecutionContinuationEnvelope(envelope, originCommentIds);

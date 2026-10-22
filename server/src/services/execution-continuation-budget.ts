@@ -215,21 +215,13 @@ export function boundExecutionContinuationEnvelope<
     dropNonOriginFromHistory();
   }
 
-  while (overBudget(true)) {
-    if (dropNonOriginFromHistory()) continue;
-    if (dropNonOriginFromDelta()) continue;
-    // Sidecars can exceed the budget by themselves. Clear them before blanking
-    // origin wake comments so a fresh-session fallback still has the source.
-    if (trimSidecar()) continue;
-    if (emptyOldestOriginBody()) continue;
-    break;
-  }
-
-  // Last resort: leftover ids/objective can still exceed the budget after
-  // messages and sidecars are gone. Drop deleted-comment ids before pending
-  // interaction ids — native replacement treats an empty pending list as
-  // "no unanswered card" and can start a fresh run.
+  // One overflow loop budgets the object that is actually returned, including
+  // sidecars, leftover ids, and truncation metadata. Do not `break` after
+  // messages: leftover interactionOutcomes / completedActions / ids can still
+  // exceed 80 KiB by themselves.
   const trimLeftoverIds = (): boolean => {
+    // Drop deleted-comment ids before pending interaction ids — native
+    // replacement treats an empty pending list as "no unanswered card".
     if (omittedDeletedIds && omittedDeletedIds.length > 0) {
       omittedDeletedIds = null;
       sidecarsTrimmed = true;
@@ -267,14 +259,12 @@ export function boundExecutionContinuationEnvelope<
   };
 
   while (overBudget(true)) {
-    if (trimLeftoverIds()) continue;
-    break;
-  }
-
-  // Final size check includes truncation metadata. Do not return an envelope
-  // that went back over budget after the last trim.
-  while (overBudget(true)) {
+    if (dropNonOriginFromHistory()) continue;
+    if (dropNonOriginFromDelta()) continue;
+    // Sidecars can exceed the budget by themselves. Clear them before blanking
+    // origin wake comments so a fresh-session fallback still has the source.
     if (trimSidecar()) continue;
+    if (emptyOldestOriginBody()) continue;
     if (trimLeftoverIds()) continue;
     break;
   }
