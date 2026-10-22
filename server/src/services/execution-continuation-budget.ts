@@ -82,7 +82,9 @@ export function boundExecutionContinuationEnvelope<
   let humanResponses = envelope.humanResponses?.slice() ?? null;
   let unresolvedInteractionIds = envelope.unresolvedInteractionIds?.slice() ?? null;
   let omittedDeletedIds = envelope.coverage.omittedDeletedIds?.slice() ?? null;
-  let objective = capExecutionContinuationObjective(envelope.objective);
+  // Keep the full objective for server checks (native completion reads this
+  // snapshot). Shorten it only when the returned envelope is still over budget.
+  let objective = envelope.objective;
 
   const wasTruncated = () =>
     omittedCount > 0 ||
@@ -232,6 +234,10 @@ export function boundExecutionContinuationEnvelope<
     if (unresolvedInteractionIds && unresolvedInteractionIds.length > 1) {
       unresolvedInteractionIds = unresolvedInteractionIds.slice(0, 1);
       sidecarsTrimmed = true;
+      continue;
+    }
+    if (objective.length > MAX_EXECUTION_CONTINUATION_OBJECTIVE_CHARS) {
+      objective = capExecutionContinuationObjective(objective);
       continue;
     }
     if (objective.length > 0) {

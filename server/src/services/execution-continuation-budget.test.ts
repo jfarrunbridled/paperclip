@@ -281,4 +281,32 @@ describe("execution continuation budget", () => {
     expect(bounded.messages.map((message) => message.id)).toEqual(["origin"]);
     expect(bounded.objective).toBe("Do the work.");
   });
+
+  it("keeps a long objective for server checks when the envelope already fits", () => {
+    const origin = continuationMessage("origin", "trigger");
+    const objective = `${"n".repeat(12_050)}Create and attach a PDF`;
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective,
+      messages: [origin],
+      interactionOutcomes: [],
+      completedWork: null,
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+      },
+    };
+    expect(envelopeBytes(envelope)).toBeLessThan(80_000);
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"]);
+    expect(bounded.objective).toBe(objective);
+    expect(bounded.objective.endsWith("Create and attach a PDF")).toBe(true);
+    expect(bounded.coverage.kind).toBe("full_task_history");
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(80_000);
+  });
 });
