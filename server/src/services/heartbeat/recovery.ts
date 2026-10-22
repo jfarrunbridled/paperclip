@@ -64,6 +64,7 @@ import {
 import { performance } from "node:perf_hooks";
 import { buildProcessLossDiagnostic } from "../process-loss-diagnostics.js";
 import { logActivity } from "../activity-log.js";
+import { rearmIssueMonitorAfterFailedWake } from "./failed-wake-monitor-rearm.js";
 import { releaseRuntimeServicesForRun } from "../workspace-runtime.js";
 import { isProcessGroupAlive } from "../local-service-supervisor.js";
 import {
@@ -2456,6 +2457,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
       if (!retriedRun) {
         await releaseIssueExecutionAndPromote(finalizedRun);
+        await rearmIssueMonitorAfterFailedWake(db, finalizedRun, now);
       }
 
       await appendRunEvent(finalizedRun, {

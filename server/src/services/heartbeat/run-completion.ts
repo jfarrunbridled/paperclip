@@ -48,6 +48,7 @@ import type { getRunLogStore, RunLogHandle } from "../run-log-store.js";
 import type { createHeartbeatRunState, getAdapterSessionCodec } from "./run-state.js";
 import type { EffectiveRunSessionConfigMetadata } from "./workspaces.js";
 import type { Db, agents } from "@paperclipai/db";
+import { rearmIssueMonitorAfterFailedWake } from "./failed-wake-monitor-rearm.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -946,6 +947,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           agent,
         );
       }
+      await rearmIssueMonitorAfterFailedWake(db, livenessRun);
       const issueCommentPolicyResult = await finalizeIssueCommentPolicy(
         livenessRun,
         agent,
@@ -1224,6 +1226,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         livenessRun,
         agent,
       );
+      await rearmIssueMonitorAfterFailedWake(db, livenessRun);
       await releaseIssueExecutionAndPromote(livenessRun, {
         // Native recovery owns the original heartbeat run through
         // exhaustion. Once its durable coordinator has classified a
@@ -1493,6 +1496,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           );
         },
       );
+      await rearmIssueMonitorAfterFailedWake(db, livenessRun).catch((rearmError) => {
+        logger.error(
+          { err: rearmError, runId },
+          "failed to re-arm issue monitor after heartbeat setup failure",
+        );
+      });
     }
     // Ensure the agent is not left stuck in "running" if the setup-failure
     // path owned the terminal transition. If another path already finalized

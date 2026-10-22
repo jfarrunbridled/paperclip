@@ -1175,6 +1175,102 @@ export function buildInitialIssueMonitorFields(input: {
   };
 }
 
+export const FAILED_WAKE_MONITOR_REARM_DELAY_MS = 60_000;
+
+const FAILED_WAKE_MONITOR_REARM_STATUSES = new Set(["failed", "timed_out", "interrupted"]);
+
+export function isIssueMonitorFailedWakeReason(wakeReason: string | null | undefined, wakeSource?: string | null) {
+  return wakeReason === "issue_monitor_due" || wakeSource === "issue.monitor" || wakeSource === "issue_monitor";
+}
+
+export function shouldRearmIssueMonitorAfterFailedWake(input: {
+  runStatus: string;
+  wakeReason?: string | null;
+  wakeSource?: string | null;
+  issueStatus: string;
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
+  monitorNextCheckAt?: Date | string | null;
+  attemptCount?: number | null;
+  maxAttempts?: number | null;
+  timeoutAt?: string | null;
+  postedComment: boolean;
+  now?: Date;
+}) {
+  if (!FAILED_WAKE_MONITOR_REARM_STATUSES.has(input.runStatus)) return false;
+  if (!isIssueMonitorFailedWakeReason(input.wakeReason ?? null, input.wakeSource ?? null)) return false;
+  if (input.postedComment) return false;
+  if (!issueAllowsMonitor(input.issueStatus, input.assigneeAgentId ?? null, input.assigneeUserId ?? null)) {
+    return false;
+  }
+  if (input.monitorNextCheckAt) return false;
+  const maxAttempts = input.maxAttempts ?? null;
+  const attemptCount = input.attemptCount ?? 0;
+  if (maxAttempts !== null && attemptCount >= maxAttempts) return false;
+  const timeoutAt = parseMonitorDate(input.timeoutAt ?? null);
+  const now = input.now ?? new Date();
+  if (timeoutAt && now.getTime() >= timeoutAt.getTime()) return false;
+  return true;
+}
+
+export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
+  issue: IssueLike;
+  policy: IssueExecutionPolicy | null;
+  nextCheckAt: Date;
+}) {
+  const existingState = parseIssueExecutionState(input.issue.executionState);
+  const currentMonitorState = derivePersistedMonitorState({
+    issue: input.issue,
+    state: existingState,
+    policy: input.policy,
+  });
+  if (!currentMonitorState) return null;
+  if (
+    !shouldRearmIssueMonitorAfterFailedWake({
+      runStatus: "failed",
+      wakeReason: "issue_monitor_due",
+      issueStatus: input.issue.status,
+      assigneeAgentId: input.issue.assigneeAgentId ?? null,
+      assigneeUserId: input.issue.assigneeUserId ?? null,
+      monitorNextCheckAt: input.issue.monitorNextCheckAt ?? null,
+      attemptCount: currentMonitorState.attemptCount,
+      maxAttempts: currentMonitorState.maxAttempts ?? null,
+      timeoutAt: currentMonitorState.timeoutAt ?? null,
+      postedComment: false,
+      now: input.nextCheckAt,
+    })
+  ) {
+    return null;
+  }
+
+  const restoredMonitor: IssueExecutionMonitorPolicy = {
+    nextCheckAt: input.nextCheckAt.toISOString(),
+    notes: currentMonitorState.notes ?? null,
+    scheduledBy: currentMonitorState.scheduledBy === "board" ? "board" : "assignee",
+    kind: currentMonitorState.kind ?? null,
+    serviceName: currentMonitorState.serviceName ?? null,
+    externalRef: currentMonitorState.externalRef ?? null,
+    timeoutAt: currentMonitorState.timeoutAt ?? null,
+    maxAttempts: currentMonitorState.maxAttempts ?? null,
+    recoveryPolicy: currentMonitorState.recoveryPolicy ?? null,
+  };
+  const nextMonitorState = buildScheduledMonitorState(currentMonitorState, restoredMonitor);
+  const nextPolicy = input.policy
+    ? { ...input.policy, monitor: restoredMonitor }
+    : normalizeIssueExecutionPolicy({ monitor: restoredMonitor });
+
+  return {
+    executionPolicy: nextPolicy as Record<string, unknown> | null,
+    executionState: executionStateWithMonitor(existingState, nextMonitorState) as Record<string, unknown> | null,
+    monitorNextCheckAt: input.nextCheckAt,
+    monitorWakeRequestedAt: null,
+    monitorAttemptCount: currentMonitorState.attemptCount,
+    monitorNotes: nextMonitorState.notes,
+    monitorScheduledBy: nextMonitorState.scheduledBy,
+    restoredMonitor,
+  };
+}
+
 export function buildIssueMonitorTriggeredPatch(input: {
   issue: IssueLike;
   policy: IssueExecutionPolicy | null;
