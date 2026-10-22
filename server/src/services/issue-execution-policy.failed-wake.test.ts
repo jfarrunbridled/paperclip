@@ -82,5 +82,51 @@ describe("failed-wake monitor re-arm helpers", () => {
     expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, attemptCount: 4 })).toBe(false);
     expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, issueStatus: "todo" })).toBe(false);
     expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, maxAttempts: null })).toBe(true);
+    expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, monitorStatus: "cleared" })).toBe(false);
+    expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, monitorStatus: "triggered" })).toBe(true);
+  });
+
+  it("does not restore a monitor that was cleared after fire", () => {
+    const triggeredAt = new Date("2026-10-16T00:05:15.000Z");
+    const nextCheckAt = new Date(triggeredAt.getTime() + FAILED_WAKE_MONITOR_REARM_DELAY_MS);
+    const rearmed = buildIssueMonitorRearmedAfterFailedWakePatch({
+      issue: {
+        status: "in_progress",
+        assigneeAgentId: agentId,
+        assigneeUserId: null,
+        executionPolicy: null,
+        executionState: {
+          status: "idle",
+          currentStageId: null,
+          currentStageIndex: null,
+          currentStageType: null,
+          currentParticipant: null,
+          returnAssignee: null,
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+          monitor: {
+            status: "cleared",
+            nextCheckAt: null,
+            lastTriggeredAt: triggeredAt.toISOString(),
+            attemptCount: 1,
+            notes: "Check deployment",
+            scheduledBy: "assignee",
+            maxAttempts: 4,
+            timeoutAt: null,
+            clearedAt: nextCheckAt.toISOString(),
+            clearReason: "cancelled",
+          },
+        },
+        monitorAttemptCount: 1,
+        monitorNextCheckAt: null,
+        monitorLastTriggeredAt: triggeredAt,
+        monitorNotes: "Check deployment",
+        monitorScheduledBy: "assignee",
+      },
+      policy: null,
+      nextCheckAt,
+    });
+    expect(rearmed).toBeNull();
   });
 });

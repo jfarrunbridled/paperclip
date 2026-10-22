@@ -8,12 +8,24 @@ import {
   heartbeatRuns,
   issueComments,
   issues,
+  subscribeDatabaseWork,
 } from "@paperclipai/db";
+import { readFileSync } from "node:fs";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
+import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
 import { FAILED_WAKE_MONITOR_REARM_DELAY_MS, parseIssueExecutionState } from "../issue-execution-policy.js";
 import { rearmIssueMonitorAfterFailedWake } from "./failed-wake-monitor-rearm.js";
+
+describe("failed-wake re-arm call sites", () => {
+  it("hooks terminal completion and restart recovery", () => {
+    const completion = readFileSync(new URL("./run-completion.ts", import.meta.url), "utf8");
+    const recovery = readFileSync(new URL("./recovery.ts", import.meta.url), "utf8");
+    expect(completion).toContain("await rearmIssueMonitorAfterFailedWake(db, livenessRun)");
+    expect(recovery).toContain("await rearmIssueMonitorAfterFailedWake(db, finalizedRun, now)");
+  });
+});
 
 const postgres = await getEmbeddedPostgresTestSupport();
 
@@ -43,6 +55,8 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
     maxAttempts?: number | null;
     monitorNextCheckAt?: Date | null;
     withComment?: boolean;
+    monitorStatus?: "triggered" | "cleared";
+    executionStateExtra?: Record<string, unknown>;
   } = {}) {
     const triggeredAt = new Date("2026-10-16T00:05:15.000Z");
     const [company] = await db.insert(companies).values({ name: "Rearm", issuePrefix: "ARM" }).returning();
@@ -73,8 +87,9 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
         completedStageIds: [],
         lastDecisionId: null,
         lastDecisionOutcome: null,
+        ...(overrides.executionStateExtra ?? {}),
         monitor: {
-          status: "triggered",
+          status: overrides.monitorStatus ?? "triggered",
           nextCheckAt: null,
           lastTriggeredAt: triggeredAt.toISOString(),
           attemptCount,
@@ -82,8 +97,8 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
           scheduledBy: "assignee",
           maxAttempts,
           timeoutAt: "2026-10-23T00:00:00.000Z",
-          clearedAt: null,
-          clearReason: null,
+          clearedAt: overrides.monitorStatus === "cleared" ? triggeredAt.toISOString() : null,
+          clearReason: overrides.monitorStatus === "cleared" ? "cancelled" : null,
         },
       },
     }).returning();
@@ -170,5 +185,27 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
     const f = await fixture({ status: "todo" });
     expect(await rearmIssueMonitorAfterFailedWake(db, f.run, f.now)).toEqual({ rearmed: false });
     expect((await readIssue(f.issue.id)).monitorNextCheckAt).toBeNull();
+  });
+
+  it("notifies the issue-monitor queue when it restores a deadline", async () => {
+    const f = await fixture();
+    const events: string[] = [];
+    const unsubscribe = subscribeDatabaseWork(db, DELIVERY_QUEUES.issueMonitors, (event) => {
+      events.push(event);
+    });
+    try {
+      expect(await rearmIssueMonitorAfterFailedWake(db, f.run, f.now)).toMatchObject({ rearmed: true });
+      expect(events).toEqual(["intent", "settled"]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("does not restore a cancelled monitor after the failed wake", async () => {
+    const f = await fixture({ monitorStatus: "cleared" });
+    expect(await rearmIssueMonitorAfterFailedWake(db, f.run, f.now)).toEqual({ rearmed: false });
+    const issue = await readIssue(f.issue.id);
+    expect(issue.monitorNextCheckAt).toBeNull();
+    expect(parseIssueExecutionState(issue.executionState)?.monitor?.status).toBe("cleared");
   });
 });

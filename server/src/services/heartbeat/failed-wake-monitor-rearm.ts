@@ -3,6 +3,7 @@ import { heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import type { Db } from "@paperclipai/db";
 import { parseObject } from "../../adapters/utils.js";
 import { logActivity } from "../activity-log.js";
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import {
   FAILED_WAKE_MONITOR_REARM_DELAY_MS,
   buildIssueMonitorRearmedAfterFailedWakePatch,
@@ -55,120 +56,126 @@ export async function rearmIssueMonitorAfterFailedWake(
   const issueId = issueIdFromRun(run as Run);
   if (!issueId) return { rearmed: false };
 
-  const [issue] = await db
-    .select()
-    .from(issues)
-    .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
-    .limit(1);
-  if (!issue) return { rearmed: false };
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const [issue] = await tx
+      .select()
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+      .for("update")
+      .limit(1);
+    if (!issue) return { rearmed: false };
 
-  const [runComment] = await db
-    .select({ id: issueComments.id })
-    .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.issueId, issue.id),
-        eq(issueComments.createdByRunId, run.id),
-        isNull(issueComments.deletedAt),
-      ),
-    )
-    .limit(1);
+    const [runComment] = await tx
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(
+        and(
+          eq(issueComments.issueId, issue.id),
+          eq(issueComments.createdByRunId, run.id),
+          isNull(issueComments.deletedAt),
+        ),
+      )
+      .limit(1);
 
-  const bounds = readMonitorBounds(issue);
-  if (
-    !shouldRearmIssueMonitorAfterFailedWake({
-      runStatus: run.status,
-      wakeReason,
-      wakeSource,
-      issueStatus: issue.status,
-      assigneeAgentId: issue.assigneeAgentId,
-      assigneeUserId: issue.assigneeUserId,
-      monitorNextCheckAt: issue.monitorNextCheckAt,
-      attemptCount: bounds.attemptCount,
-      maxAttempts: bounds.maxAttempts,
-      timeoutAt: bounds.timeoutAt,
-      postedComment: Boolean(runComment),
-      now,
-    })
-  ) {
-    return { rearmed: false };
-  }
+    const bounds = readMonitorBounds(issue);
+    if (
+      !shouldRearmIssueMonitorAfterFailedWake({
+        runStatus: run.status,
+        wakeReason,
+        wakeSource,
+        issueStatus: issue.status,
+        assigneeAgentId: issue.assigneeAgentId,
+        assigneeUserId: issue.assigneeUserId,
+        monitorStatus: bounds.parsed?.status ?? "triggered",
+        monitorNextCheckAt: issue.monitorNextCheckAt,
+        attemptCount: bounds.attemptCount,
+        maxAttempts: bounds.maxAttempts,
+        timeoutAt: bounds.timeoutAt,
+        postedComment: Boolean(runComment),
+        now,
+      })
+    ) {
+      return { rearmed: false };
+    }
 
-  const nextCheckAt = new Date(now.getTime() + FAILED_WAKE_MONITOR_REARM_DELAY_MS);
-  const issueForPatch = bounds.parsed
-    ? issue
-    : {
-        ...issue,
-        executionState: {
-          status: "idle",
-          currentStageId: null,
-          currentStageIndex: null,
-          currentStageType: null,
-          currentParticipant: null,
-          returnAssignee: null,
-          completedStageIds: [],
-          lastDecisionId: null,
-          lastDecisionOutcome: null,
-          monitor: {
-            status: "triggered",
-            nextCheckAt: null,
-            lastTriggeredAt: issue.monitorLastTriggeredAt?.toISOString() ?? null,
-            attemptCount: bounds.attemptCount,
-            notes: issue.monitorNotes ?? null,
-            scheduledBy: issue.monitorScheduledBy === "board" ? "board" : "assignee",
-            maxAttempts: bounds.maxAttempts,
-            timeoutAt: bounds.timeoutAt,
-            clearedAt: null,
-            clearReason: null,
+    const nextCheckAt = new Date(now.getTime() + FAILED_WAKE_MONITOR_REARM_DELAY_MS);
+    const issueForPatch = bounds.parsed
+      ? issue
+      : {
+          ...issue,
+          executionState: {
+            status: "idle",
+            currentStageId: null,
+            currentStageIndex: null,
+            currentStageType: null,
+            currentParticipant: null,
+            returnAssignee: null,
+            completedStageIds: [],
+            lastDecisionId: null,
+            lastDecisionOutcome: null,
+            monitor: {
+              status: "triggered",
+              nextCheckAt: null,
+              lastTriggeredAt: issue.monitorLastTriggeredAt?.toISOString() ?? null,
+              attemptCount: bounds.attemptCount,
+              notes: issue.monitorNotes ?? null,
+              scheduledBy: issue.monitorScheduledBy === "board" ? "board" : "assignee",
+              maxAttempts: bounds.maxAttempts,
+              timeoutAt: bounds.timeoutAt,
+              clearedAt: null,
+              clearReason: null,
+            },
           },
-        },
-      };
-  const policy = normalizeIssueExecutionPolicy(issue.executionPolicy);
-  const patch = buildIssueMonitorRearmedAfterFailedWakePatch({
-    issue: issueForPatch,
-    policy,
-    nextCheckAt,
+        };
+    const policy = normalizeIssueExecutionPolicy(issue.executionPolicy);
+    const patch = buildIssueMonitorRearmedAfterFailedWakePatch({
+      issue: issueForPatch,
+      policy,
+      nextCheckAt,
+    });
+    if (!patch) return { rearmed: false };
+
+    const { restoredMonitor: _restoredMonitor, ...issuePatch } = patch;
+    await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
+    const updated = await tx
+      .update(issues)
+      .set({
+        ...issuePatch,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(issues.id, issue.id),
+          eq(issues.companyId, run.companyId),
+          isNull(issues.monitorNextCheckAt),
+          eq(issues.status, issue.status),
+        ),
+      )
+      .returning({ id: issues.id, monitorNextCheckAt: issues.monitorNextCheckAt });
+
+    if (updated.length === 0) return { rearmed: false };
+
+    await logActivity(tx, {
+      companyId: issue.companyId,
+      actorType: "system",
+      actorId: "heartbeat_scheduler",
+      agentId: run.agentId,
+      runId: run.id,
+      action: "issue.monitor_rearmed_after_failed_wake",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        identifier: issue.identifier,
+        source: "failed_wake",
+        nextCheckAt: nextCheckAt.toISOString(),
+        attemptCount: bounds.attemptCount,
+        maxAttempts: bounds.maxAttempts,
+        failedRunId: run.id,
+        failedRunStatus: run.status,
+      },
+    });
+
+    return { rearmed: true, nextCheckAt };
   });
-  if (!patch) return { rearmed: false };
-
-  const { restoredMonitor: _restoredMonitor, ...issuePatch } = patch;
-  const updated = await db
-    .update(issues)
-    .set({
-      ...issuePatch,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(issues.id, issue.id),
-        eq(issues.companyId, run.companyId),
-        isNull(issues.monitorNextCheckAt),
-        eq(issues.status, issue.status),
-      ),
-    )
-    .returning({ id: issues.id, monitorNextCheckAt: issues.monitorNextCheckAt });
-
-  if (updated.length === 0) return { rearmed: false };
-
-  await logActivity(db, {
-    companyId: issue.companyId,
-    actorType: "system",
-    actorId: "heartbeat_scheduler",
-    agentId: run.agentId,
-    runId: run.id,
-    action: "issue.monitor_rearmed_after_failed_wake",
-    entityType: "issue",
-    entityId: issue.id,
-    details: {
-      identifier: issue.identifier,
-      source: "failed_wake",
-      nextCheckAt: nextCheckAt.toISOString(),
-      attemptCount: bounds.attemptCount,
-      maxAttempts: bounds.maxAttempts,
-      failedRunId: run.id,
-      failedRunStatus: run.status,
-    },
-  });
-
-  return { rearmed: true, nextCheckAt };
 }

@@ -1190,6 +1190,7 @@ export function shouldRearmIssueMonitorAfterFailedWake(input: {
   issueStatus: string;
   assigneeAgentId?: string | null;
   assigneeUserId?: string | null;
+  monitorStatus?: string | null;
   monitorNextCheckAt?: Date | string | null;
   attemptCount?: number | null;
   maxAttempts?: number | null;
@@ -1203,6 +1204,7 @@ export function shouldRearmIssueMonitorAfterFailedWake(input: {
   if (!issueAllowsMonitor(input.issueStatus, input.assigneeAgentId ?? null, input.assigneeUserId ?? null)) {
     return false;
   }
+  if (input.monitorStatus && input.monitorStatus !== "triggered") return false;
   if (input.monitorNextCheckAt) return false;
   const maxAttempts = input.maxAttempts ?? null;
   const attemptCount = input.attemptCount ?? 0;
@@ -1232,6 +1234,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
       issueStatus: input.issue.status,
       assigneeAgentId: input.issue.assigneeAgentId ?? null,
       assigneeUserId: input.issue.assigneeUserId ?? null,
+      monitorStatus: currentMonitorState.status,
       monitorNextCheckAt: input.issue.monitorNextCheckAt ?? null,
       attemptCount: currentMonitorState.attemptCount,
       maxAttempts: currentMonitorState.maxAttempts ?? null,
