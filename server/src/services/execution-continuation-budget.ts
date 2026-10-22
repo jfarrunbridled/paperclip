@@ -98,12 +98,14 @@ export function boundExecutionContinuationEnvelope<
       ...envelope,
       objective,
       messages,
+      // Always overwrite bulky sidecars so a leftover `...envelope` copy cannot
+      // exceed the budget after trimming stops. Null means "omit from JSON".
       completedWork,
-      ...(completedActions ? { completedActions } : {}),
-      ...(interactionOutcomes ? { interactionOutcomes } : {}),
-      ...(recoveryOutcomes ? { recoveryOutcomes } : {}),
-      ...(humanResponses ? { humanResponses } : {}),
-      ...(unresolvedInteractionIds ? { unresolvedInteractionIds } : {}),
+      completedActions: completedActions ?? undefined,
+      interactionOutcomes: interactionOutcomes ?? undefined,
+      recoveryOutcomes: recoveryOutcomes ?? undefined,
+      humanResponses: humanResponses ?? undefined,
+      unresolvedInteractionIds: unresolvedInteractionIds ?? undefined,
       ...(envelope.resumeDelta && resumeMessages
         ? { resumeDelta: { ...envelope.resumeDelta, messages: resumeMessages } }
         : {}),
@@ -216,8 +218,10 @@ export function boundExecutionContinuationEnvelope<
   while (overBudget(true)) {
     if (dropNonOriginFromHistory()) continue;
     if (dropNonOriginFromDelta()) continue;
-    if (emptyOldestOriginBody()) continue;
+    // Sidecars can exceed the budget by themselves. Clear them before blanking
+    // origin wake comments so a fresh-session fallback still has the source.
     if (trimSidecar()) continue;
+    if (emptyOldestOriginBody()) continue;
     break;
   }
 
@@ -225,40 +229,53 @@ export function boundExecutionContinuationEnvelope<
   // messages and sidecars are gone. Drop deleted-comment ids before pending
   // interaction ids — native replacement treats an empty pending list as
   // "no unanswered card" and can start a fresh run.
-  while (overBudget(true)) {
+  const trimLeftoverIds = (): boolean => {
     if (omittedDeletedIds && omittedDeletedIds.length > 0) {
       omittedDeletedIds = null;
       sidecarsTrimmed = true;
-      continue;
+      return true;
     }
     if (unresolvedInteractionIds && unresolvedInteractionIds.length > 1) {
       unresolvedInteractionIds = unresolvedInteractionIds.slice(0, 1);
       sidecarsTrimmed = true;
-      continue;
+      return true;
     }
     if (objective.length > MAX_EXECUTION_CONTINUATION_OBJECTIVE_CHARS) {
       objective = capExecutionContinuationObjective(objective);
-      continue;
+      return true;
     }
     if (objective.length > 0) {
       objective = "";
-      continue;
+      return true;
     }
     if (resumeMessages && resumeMessages.length > 0) {
       resumeMessages = [];
       omittedCount += 1;
-      continue;
+      return true;
     }
     if (messages.length > 0) {
       messages = [];
       omittedCount += 1;
-      continue;
+      return true;
     }
     if (unresolvedInteractionIds && unresolvedInteractionIds.length > 0) {
       unresolvedInteractionIds = [];
       sidecarsTrimmed = true;
-      continue;
+      return true;
     }
+    return false;
+  };
+
+  while (overBudget(true)) {
+    if (trimLeftoverIds()) continue;
+    break;
+  }
+
+  // Final size check includes truncation metadata. Do not return an envelope
+  // that went back over budget after the last trim.
+  while (overBudget(true)) {
+    if (trimSidecar()) continue;
+    if (trimLeftoverIds()) continue;
     break;
   }
 

@@ -309,4 +309,77 @@ describe("execution continuation budget", () => {
     expect(bounded.coverage.kind).toBe("full_task_history");
     expect(envelopeBytes(bounded)).toBeLessThanOrEqual(80_000);
   });
+
+  it("keeps the returned envelope under budget when sidecars alone overflow", () => {
+    const origin = continuationMessage("origin", "trigger");
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [origin],
+      interactionOutcomes: [
+        { id: "card", kind: "ask_user_questions", status: "answered", result: { a: "r".repeat(8_000) } },
+      ],
+      completedActions: [
+        { runId: "run", receiptId: "r", operationId: "op", result: { blob: "c".repeat(8_000) } },
+      ],
+      completedWork: null,
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+      },
+    };
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 2_000);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(2_000);
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+    expect(bounded.messages.map((message) => message.id)).toEqual(["origin"]);
+    expect(bounded.completedActions).toEqual([]);
+    expect(bounded.interactionOutcomes).toEqual([]);
+    expect(bounded.objective).toBe("Do the work.");
+  });
+
+  it("budgets truncation metadata on the object it returns", () => {
+    const origin = continuationMessage("origin", "o".repeat(400));
+    const extra = continuationMessage("extra", "e".repeat(400));
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "task_execution", interactionId: null, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [extra, origin],
+      interactionOutcomes: [],
+      completedWork: null,
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+      },
+    };
+    const afterDrop = {
+      ...envelope,
+      messages: [origin],
+      coverage: {
+        kind: "truncated_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+        omittedCount: 1,
+        oldestRetainedCommentId: "origin",
+      },
+    };
+    const budget = envelopeBytes(afterDrop);
+    expect(envelopeBytes(envelope)).toBeGreaterThan(budget);
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], budget);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(budget);
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+    expect(bounded.coverage.omittedCount).toBeGreaterThan(0);
+    expect(bounded.messages.map((message) => message.id)).toContain("origin");
+  });
 });
