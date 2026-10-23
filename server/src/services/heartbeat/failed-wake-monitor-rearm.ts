@@ -195,7 +195,7 @@ export async function rearmIssueMonitorAfterFailedWake(
         identifier: issue.identifier,
         source: "failed_wake",
         nextCheckAt: nextCheckAt.toISOString(),
-        attemptCount: bounds.attemptCount,
+        attemptCount: issuePatch.monitorAttemptCount,
         maxAttempts: bounds.maxAttempts,
         failedRunId: run.id,
         failedRunStatus: run.status,

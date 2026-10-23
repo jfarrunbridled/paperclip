@@ -97,11 +97,150 @@ describe("failed-wake monitor re-arm helpers", () => {
     expect(
       shouldRearmIssueMonitorAfterFailedWake({
         ...base,
+        attemptCount: 0,
+        maxAttempts: 1,
+        monitorStatus: "scheduled",
+        monitorNextCheckAt: originating,
+        originatingNextCheckAt: originating,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRearmIssueMonitorAfterFailedWake({
+        ...base,
         monitorStatus: "scheduled",
         monitorNextCheckAt: originating,
         originatingNextCheckAt: new Date("2026-10-17T00:00:30.000Z"),
       }),
     ).toBe(false);
+  });
+
+  it("counts an unconsumed originating fire so maxAttempts still binds", () => {
+    const originating = new Date("2026-10-16T00:05:00.000Z");
+    const nextCheckAt = new Date(originating.getTime() + FAILED_WAKE_MONITOR_REARM_DELAY_MS);
+    const skipped = buildIssueMonitorRearmedAfterFailedWakePatch({
+      issue: {
+        status: "in_progress",
+        assigneeAgentId: agentId,
+        assigneeUserId: null,
+        executionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [],
+          monitor: {
+            nextCheckAt: originating.toISOString(),
+            notes: "Check deployment",
+            scheduledBy: "assignee",
+            maxAttempts: 1,
+          },
+        },
+        executionState: {
+          status: "idle",
+          currentStageId: null,
+          currentStageIndex: null,
+          currentStageType: null,
+          currentParticipant: null,
+          returnAssignee: null,
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+          monitor: {
+            status: "scheduled",
+            nextCheckAt: originating.toISOString(),
+            lastTriggeredAt: null,
+            attemptCount: 0,
+            notes: "Check deployment",
+            scheduledBy: "assignee",
+            maxAttempts: 1,
+            timeoutAt: null,
+            clearedAt: null,
+            clearReason: null,
+          },
+        },
+        monitorAttemptCount: 0,
+        monitorNextCheckAt: originating,
+        monitorLastTriggeredAt: null,
+        monitorNotes: "Check deployment",
+        monitorScheduledBy: "assignee",
+      },
+      policy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [],
+        monitor: {
+          nextCheckAt: originating.toISOString(),
+          notes: "Check deployment",
+          scheduledBy: "assignee",
+          maxAttempts: 1,
+        },
+      },
+      nextCheckAt,
+      originatingNextCheckAt: originating,
+    });
+    expect(skipped).toBeNull();
+
+    const restored = buildIssueMonitorRearmedAfterFailedWakePatch({
+      issue: {
+        status: "in_progress",
+        assigneeAgentId: agentId,
+        assigneeUserId: null,
+        executionPolicy: {
+          mode: "normal",
+          commentRequired: true,
+          stages: [],
+          monitor: {
+            nextCheckAt: originating.toISOString(),
+            notes: "Check deployment",
+            scheduledBy: "assignee",
+            maxAttempts: 4,
+          },
+        },
+        executionState: {
+          status: "idle",
+          currentStageId: null,
+          currentStageIndex: null,
+          currentStageType: null,
+          currentParticipant: null,
+          returnAssignee: null,
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+          monitor: {
+            status: "scheduled",
+            nextCheckAt: originating.toISOString(),
+            lastTriggeredAt: null,
+            attemptCount: 0,
+            notes: "Check deployment",
+            scheduledBy: "assignee",
+            maxAttempts: 4,
+            timeoutAt: null,
+            clearedAt: null,
+            clearReason: null,
+          },
+        },
+        monitorAttemptCount: 0,
+        monitorNextCheckAt: originating,
+        monitorLastTriggeredAt: null,
+        monitorNotes: "Check deployment",
+        monitorScheduledBy: "assignee",
+      },
+      policy: {
+        mode: "normal",
+        commentRequired: true,
+        stages: [],
+        monitor: {
+          nextCheckAt: originating.toISOString(),
+          notes: "Check deployment",
+          scheduledBy: "assignee",
+          maxAttempts: 4,
+        },
+      },
+      nextCheckAt,
+      originatingNextCheckAt: originating,
+    })!;
+    expect(restored.monitorAttemptCount).toBe(1);
+    expect(restored.executionState).toMatchObject({
+      monitor: { status: "scheduled", attemptCount: 1, maxAttempts: 4 },
+    });
   });
 
   it("does not restore a monitor that was cleared after fire", () => {

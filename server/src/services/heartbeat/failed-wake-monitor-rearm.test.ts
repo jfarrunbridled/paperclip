@@ -234,15 +234,38 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
   it("restores when consume-on-enqueue has not landed yet and the originating deadline is still set", async () => {
     const originating = new Date("2026-10-16T00:05:00.000Z");
     const f = await fixture({
+      attemptCount: 0,
       monitorNextCheckAt: originating,
       originatingNextCheckAt: originating.toISOString(),
       monitorStatus: "scheduled",
     });
     const result = await rearmIssueMonitorAfterFailedWake(db, f.run, f.now);
     expect(result.rearmed).toBe(true);
-    expect((await readIssue(f.issue.id)).monitorNextCheckAt?.toISOString()).toBe(
+    const issue = await readIssue(f.issue.id);
+    expect(issue.monitorNextCheckAt?.toISOString()).toBe(
       new Date(f.now.getTime() + FAILED_WAKE_MONITOR_REARM_DELAY_MS).toISOString(),
     );
+    expect(issue.monitorAttemptCount).toBe(1);
+    expect(parseIssueExecutionState(issue.executionState)?.monitor).toMatchObject({
+      status: "scheduled",
+      attemptCount: 1,
+      maxAttempts: 4,
+    });
+  });
+
+  it("does not restore an unconsumed last attempt", async () => {
+    const originating = new Date("2026-10-16T00:05:00.000Z");
+    const f = await fixture({
+      attemptCount: 0,
+      maxAttempts: 1,
+      monitorNextCheckAt: originating,
+      originatingNextCheckAt: originating.toISOString(),
+      monitorStatus: "scheduled",
+    });
+    expect(await rearmIssueMonitorAfterFailedWake(db, f.run, f.now)).toEqual({ rearmed: false });
+    const issue = await readIssue(f.issue.id);
+    expect(issue.monitorNextCheckAt).toEqual(originating);
+    expect(issue.monitorAttemptCount).toBe(0);
   });
 
   it("does not restore when a retry already owns the next attempt", async () => {

@@ -1231,9 +1231,14 @@ export function shouldRearmIssueMonitorAfterFailedWake(input: {
     if (!(input.monitorStatus === "scheduled" && matchesOriginatingDeadline)) return false;
   }
   if (input.monitorNextCheckAt && !matchesOriginatingDeadline) return false;
+  const unconsumedOriginatingDeadline =
+    input.monitorStatus === "scheduled" && matchesOriginatingDeadline;
   const maxAttempts = input.maxAttempts ?? null;
   const attemptCount = input.attemptCount ?? 0;
-  if (maxAttempts !== null && attemptCount >= maxAttempts) return false;
+  // An unconsumed fire has not incremented yet. Count it here so maxAttempts
+  // still binds when setup fails before consume-on-enqueue.
+  const spentAttemptCount = unconsumedOriginatingDeadline ? attemptCount + 1 : attemptCount;
+  if (maxAttempts !== null && spentAttemptCount >= maxAttempts) return false;
   const timeoutAt = parseMonitorDate(input.timeoutAt ?? null);
   const now = input.now ?? new Date();
   if (timeoutAt && now.getTime() >= timeoutAt.getTime()) return false;
@@ -1253,6 +1258,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
     policy: input.policy,
   });
   if (!currentMonitorState) return null;
+  const originatingNextCheckAt = input.originatingNextCheckAt ?? null;
   if (
     !shouldRearmIssueMonitorAfterFailedWake({
       runStatus: "failed",
@@ -1262,7 +1268,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
       assigneeUserId: input.issue.assigneeUserId ?? null,
       monitorStatus: currentMonitorState.status,
       monitorNextCheckAt: input.issue.monitorNextCheckAt ?? null,
-      originatingNextCheckAt: input.originatingNextCheckAt ?? null,
+      originatingNextCheckAt,
       attemptCount: currentMonitorState.attemptCount,
       maxAttempts: currentMonitorState.maxAttempts ?? null,
       timeoutAt: currentMonitorState.timeoutAt ?? null,
@@ -1272,6 +1278,16 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
   ) {
     return null;
   }
+
+  const unconsumedOriginatingDeadline =
+    currentMonitorState.status === "scheduled" &&
+    nextCheckMatchesOriginatingDeadline(input.issue.monitorNextCheckAt ?? null, originatingNextCheckAt);
+  const spentAttemptCount = unconsumedOriginatingDeadline
+    ? (currentMonitorState.attemptCount ?? 0) + 1
+    : currentMonitorState.attemptCount;
+  const previousMonitorState = unconsumedOriginatingDeadline
+    ? { ...currentMonitorState, attemptCount: spentAttemptCount }
+    : currentMonitorState;
 
   const restoredMonitor: IssueExecutionMonitorPolicy = {
     nextCheckAt: input.nextCheckAt.toISOString(),
@@ -1284,7 +1300,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
     maxAttempts: currentMonitorState.maxAttempts ?? null,
     recoveryPolicy: currentMonitorState.recoveryPolicy ?? null,
   };
-  const nextMonitorState = buildScheduledMonitorState(currentMonitorState, restoredMonitor);
+  const nextMonitorState = buildScheduledMonitorState(previousMonitorState, restoredMonitor);
   const nextPolicy = input.policy
     ? { ...input.policy, monitor: restoredMonitor }
     : normalizeIssueExecutionPolicy({ monitor: restoredMonitor });
@@ -1294,7 +1310,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
     executionState: executionStateWithMonitor(existingState, nextMonitorState) as Record<string, unknown> | null,
     monitorNextCheckAt: input.nextCheckAt,
     monitorWakeRequestedAt: null,
-    monitorAttemptCount: currentMonitorState.attemptCount,
+    monitorAttemptCount: spentAttemptCount,
     monitorNotes: nextMonitorState.notes,
     monitorScheduledBy: nextMonitorState.scheduledBy,
     restoredMonitor,
