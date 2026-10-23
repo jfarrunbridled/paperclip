@@ -84,6 +84,24 @@ describe("failed-wake monitor re-arm helpers", () => {
     expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, maxAttempts: null })).toBe(true);
     expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, monitorStatus: "cleared" })).toBe(false);
     expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, monitorStatus: "triggered" })).toBe(true);
+    expect(shouldRearmIssueMonitorAfterFailedWake({ ...base, retryOwnsNextAttempt: true })).toBe(false);
+    const originating = new Date("2026-10-16T00:05:00.000Z");
+    expect(
+      shouldRearmIssueMonitorAfterFailedWake({
+        ...base,
+        monitorStatus: "scheduled",
+        monitorNextCheckAt: originating,
+        originatingNextCheckAt: originating,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRearmIssueMonitorAfterFailedWake({
+        ...base,
+        monitorStatus: "scheduled",
+        monitorNextCheckAt: originating,
+        originatingNextCheckAt: new Date("2026-10-17T00:00:30.000Z"),
+      }),
+    ).toBe(false);
   });
 
   it("does not restore a monitor that was cleared after fire", () => {

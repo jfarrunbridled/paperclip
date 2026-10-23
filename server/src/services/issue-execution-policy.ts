@@ -1183,6 +1183,20 @@ export function isIssueMonitorFailedWakeReason(wakeReason: string | null | undef
   return wakeReason === "issue_monitor_due" || wakeSource === "issue.monitor" || wakeSource === "issue_monitor";
 }
 
+function coerceMonitorDeadline(value: Date | string | null | undefined) {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  return parseMonitorDate(typeof value === "string" ? value : null);
+}
+
+function nextCheckMatchesOriginatingDeadline(
+  monitorNextCheckAt: Date | string | null | undefined,
+  originatingNextCheckAt: Date | string | null | undefined,
+) {
+  const current = coerceMonitorDeadline(monitorNextCheckAt);
+  const originating = coerceMonitorDeadline(originatingNextCheckAt);
+  return Boolean(current && originating && current.getTime() === originating.getTime());
+}
+
 export function shouldRearmIssueMonitorAfterFailedWake(input: {
   runStatus: string;
   wakeReason?: string | null;
@@ -1192,6 +1206,8 @@ export function shouldRearmIssueMonitorAfterFailedWake(input: {
   assigneeUserId?: string | null;
   monitorStatus?: string | null;
   monitorNextCheckAt?: Date | string | null;
+  originatingNextCheckAt?: Date | string | null;
+  retryOwnsNextAttempt?: boolean;
   attemptCount?: number | null;
   maxAttempts?: number | null;
   timeoutAt?: string | null;
@@ -1201,11 +1217,20 @@ export function shouldRearmIssueMonitorAfterFailedWake(input: {
   if (!FAILED_WAKE_MONITOR_REARM_STATUSES.has(input.runStatus)) return false;
   if (!isIssueMonitorFailedWakeReason(input.wakeReason ?? null, input.wakeSource ?? null)) return false;
   if (input.postedComment) return false;
+  if (input.retryOwnsNextAttempt) return false;
   if (!issueAllowsMonitor(input.issueStatus, input.assigneeAgentId ?? null, input.assigneeUserId ?? null)) {
     return false;
   }
-  if (input.monitorStatus && input.monitorStatus !== "triggered") return false;
-  if (input.monitorNextCheckAt) return false;
+  const matchesOriginatingDeadline = nextCheckMatchesOriginatingDeadline(
+    input.monitorNextCheckAt,
+    input.originatingNextCheckAt,
+  );
+  // Consume-on-enqueue can land after a fast setup failure. The originating
+  // fire deadline is not a later agent PATCH; treat it as still eligible.
+  if (input.monitorStatus && input.monitorStatus !== "triggered") {
+    if (!(input.monitorStatus === "scheduled" && matchesOriginatingDeadline)) return false;
+  }
+  if (input.monitorNextCheckAt && !matchesOriginatingDeadline) return false;
   const maxAttempts = input.maxAttempts ?? null;
   const attemptCount = input.attemptCount ?? 0;
   if (maxAttempts !== null && attemptCount >= maxAttempts) return false;
@@ -1219,6 +1244,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
   issue: IssueLike;
   policy: IssueExecutionPolicy | null;
   nextCheckAt: Date;
+  originatingNextCheckAt?: Date | string | null;
 }) {
   const existingState = parseIssueExecutionState(input.issue.executionState);
   const currentMonitorState = derivePersistedMonitorState({
@@ -1236,6 +1262,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
       assigneeUserId: input.issue.assigneeUserId ?? null,
       monitorStatus: currentMonitorState.status,
       monitorNextCheckAt: input.issue.monitorNextCheckAt ?? null,
+      originatingNextCheckAt: input.originatingNextCheckAt ?? null,
       attemptCount: currentMonitorState.attemptCount,
       maxAttempts: currentMonitorState.maxAttempts ?? null,
       timeoutAt: currentMonitorState.timeoutAt ?? null,

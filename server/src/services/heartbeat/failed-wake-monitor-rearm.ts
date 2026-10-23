@@ -19,6 +19,24 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+function readOriginatingNextCheckAt(run: Pick<Run, "contextSnapshot">) {
+  const context = parseObject(run.contextSnapshot);
+  const payload = parseObject(context.payload);
+  return (
+    readNonEmptyString(context.nextCheckAt) ??
+    readNonEmptyString(payload.nextCheckAt)
+  );
+}
+
+export function retryOutcomeOwnsNextAttempt(result: unknown) {
+  return Boolean(
+    result &&
+      typeof result === "object" &&
+      "outcome" in result &&
+      (result as { outcome?: unknown }).outcome === "scheduled",
+  );
+}
+
 function readMonitorBounds(issue: typeof issues.$inferSelect) {
   const parsed = parseIssueExecutionState(issue.executionState)?.monitor ?? null;
   const raw = parseObject(parseObject(issue.executionState).monitor);
@@ -45,6 +63,7 @@ export async function rearmIssueMonitorAfterFailedWake(
   db: Db,
   run: Pick<Run, "id" | "companyId" | "agentId" | "status" | "contextSnapshot">,
   now = new Date(),
+  opts?: { retryOwnsNextAttempt?: boolean },
 ): Promise<{ rearmed: boolean; nextCheckAt?: Date }> {
   const context = parseObject(run.contextSnapshot);
   const wakeReason = readNonEmptyString(context.wakeReason);
@@ -52,9 +71,11 @@ export async function rearmIssueMonitorAfterFailedWake(
   if (!isIssueMonitorFailedWakeReason(wakeReason, wakeSource)) {
     return { rearmed: false };
   }
+  if (opts?.retryOwnsNextAttempt) return { rearmed: false };
 
   const issueId = issueIdFromRun(run as Run);
   if (!issueId) return { rearmed: false };
+  const originatingNextCheckAt = readOriginatingNextCheckAt(run);
 
   return db.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
@@ -87,8 +108,10 @@ export async function rearmIssueMonitorAfterFailedWake(
         issueStatus: issue.status,
         assigneeAgentId: issue.assigneeAgentId,
         assigneeUserId: issue.assigneeUserId,
-        monitorStatus: bounds.parsed?.status ?? "triggered",
+        monitorStatus: bounds.parsed?.status ?? (issue.monitorNextCheckAt ? "scheduled" : "triggered"),
         monitorNextCheckAt: issue.monitorNextCheckAt,
+        originatingNextCheckAt,
+        retryOwnsNextAttempt: opts?.retryOwnsNextAttempt,
         attemptCount: bounds.attemptCount,
         maxAttempts: bounds.maxAttempts,
         timeoutAt: bounds.timeoutAt,
@@ -115,8 +138,8 @@ export async function rearmIssueMonitorAfterFailedWake(
             lastDecisionId: null,
             lastDecisionOutcome: null,
             monitor: {
-              status: "triggered",
-              nextCheckAt: null,
+              status: issue.monitorNextCheckAt ? "scheduled" : "triggered",
+              nextCheckAt: issue.monitorNextCheckAt?.toISOString() ?? null,
               lastTriggeredAt: issue.monitorLastTriggeredAt?.toISOString() ?? null,
               attemptCount: bounds.attemptCount,
               notes: issue.monitorNotes ?? null,
@@ -133,6 +156,7 @@ export async function rearmIssueMonitorAfterFailedWake(
       issue: issueForPatch,
       policy,
       nextCheckAt,
+      originatingNextCheckAt,
     });
     if (!patch) return { rearmed: false };
 
@@ -148,8 +172,10 @@ export async function rearmIssueMonitorAfterFailedWake(
         and(
           eq(issues.id, issue.id),
           eq(issues.companyId, run.companyId),
-          isNull(issues.monitorNextCheckAt),
           eq(issues.status, issue.status),
+          issue.monitorNextCheckAt
+            ? eq(issues.monitorNextCheckAt, issue.monitorNextCheckAt)
+            : isNull(issues.monitorNextCheckAt),
         ),
       )
       .returning({ id: issues.id, monitorNextCheckAt: issues.monitorNextCheckAt });

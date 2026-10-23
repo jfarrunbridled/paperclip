@@ -48,7 +48,7 @@ import type { getRunLogStore, RunLogHandle } from "../run-log-store.js";
 import type { createHeartbeatRunState, getAdapterSessionCodec } from "./run-state.js";
 import type { EffectiveRunSessionConfigMetadata } from "./workspaces.js";
 import type { Db, agents } from "@paperclipai/db";
-import { rearmIssueMonitorAfterFailedWake } from "./failed-wake-monitor-rearm.js";
+import { rearmIssueMonitorAfterFailedWake, retryOutcomeOwnsNextAttempt } from "./failed-wake-monitor-rearm.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -911,15 +911,18 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           `[paperclip] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
+      let retryOwnsNextAttempt = false;
       if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
         const policy = parseMaxTurnContinuationPolicy(agent);
         if (policy.enabled && policy.maxAttempts > 0) {
-          await scheduleBoundedRetryForRun(livenessRun, agent, {
-            retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
-            wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
-            maxAttempts: policy.maxAttempts,
-            delayMs: policy.delayMs,
-          });
+          retryOwnsNextAttempt = retryOutcomeOwnsNextAttempt(
+            await scheduleBoundedRetryForRun(livenessRun, agent, {
+              retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
+              wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
+              maxAttempts: policy.maxAttempts,
+              delayMs: policy.delayMs,
+            }),
+          );
         } else {
           await appendRunEvent(livenessRun, {
             eventType: "lifecycle",
@@ -937,17 +940,23 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         outcome === "failed" &&
         readTransientRecoveryContractFromRun(livenessRun)
       ) {
-        await scheduleBoundedRetryForRun(livenessRun, agent);
+        retryOwnsNextAttempt = retryOutcomeOwnsNextAttempt(
+          await scheduleBoundedRetryForRun(livenessRun, agent),
+        );
       } else if (
         outcome === "failed" &&
         !(await legacyExecutionNeedsReconciliationWithEvidence(db, livenessRun))
       ) {
-        await scheduleInteractionContinuationInfrastructureRetryIfEligible(
-          livenessRun,
-          agent,
+        retryOwnsNextAttempt = retryOutcomeOwnsNextAttempt(
+          await scheduleInteractionContinuationInfrastructureRetryIfEligible(
+            livenessRun,
+            agent,
+          ),
         );
       }
-      await rearmIssueMonitorAfterFailedWake(db, livenessRun);
+      await rearmIssueMonitorAfterFailedWake(db, livenessRun, new Date(), {
+        retryOwnsNextAttempt,
+      });
       const issueCommentPolicyResult = await finalizeIssueCommentPolicy(
         livenessRun,
         agent,
@@ -1222,11 +1231,14 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       ) {
         await finalizeIssueCommentPolicy(livenessRun, agent);
       }
-      await scheduleInteractionContinuationInfrastructureRetryIfEligible(
-        livenessRun,
-        agent,
-      );
-      await rearmIssueMonitorAfterFailedWake(db, livenessRun);
+      const adapterFailureRetry =
+        await scheduleInteractionContinuationInfrastructureRetryIfEligible(
+          livenessRun,
+          agent,
+        );
+      await rearmIssueMonitorAfterFailedWake(db, livenessRun, new Date(), {
+        retryOwnsNextAttempt: retryOutcomeOwnsNextAttempt(adapterFailureRetry),
+      });
       await releaseIssueExecutionAndPromote(livenessRun, {
         // Native recovery owns the original heartbeat run through
         // exhaustion. Once its durable coordinator has classified a
@@ -1449,6 +1461,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       const failedAgent =
         setupFailureAgent ??
         (await getAgent(run.agentId).catch(() => null));
+      let setupFailureRetryOwnsNextAttempt = false;
       if (failedAgent) {
         await refreshContinuationSummaryForRun(
           livenessRun,
@@ -1465,17 +1478,23 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // No provider work began. Retry temporary host scan failures with
         // the existing durable failure budget, before releasing execution.
         // Generic recovery must not grant a second budget on exhaustion.
-        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
-          ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
-          : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
-        ).catch((retryError) => {
+        try {
+          setupFailureRetryOwnsNextAttempt = retryOutcomeOwnsNextAttempt(
+            await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+              ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
+              : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
+            ),
+          );
+        } catch (retryError) {
           logger.warn(
             { err: retryError, runId: livenessRun.id },
             "failed to schedule interaction continuation retry after setup failure",
           );
-        });
+        }
       }
-      await rearmIssueMonitorAfterFailedWake(db, livenessRun).catch((rearmError) => {
+      await rearmIssueMonitorAfterFailedWake(db, livenessRun, new Date(), {
+        retryOwnsNextAttempt: setupFailureRetryOwnsNextAttempt,
+      }).catch((rearmError) => {
         logger.error(
           { err: rearmError, runId },
           "failed to re-arm issue monitor after heartbeat setup failure",

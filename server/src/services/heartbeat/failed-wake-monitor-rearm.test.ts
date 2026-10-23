@@ -22,8 +22,9 @@ describe("failed-wake re-arm call sites", () => {
   it("hooks terminal completion and restart recovery", () => {
     const completion = readFileSync(new URL("./run-completion.ts", import.meta.url), "utf8");
     const recovery = readFileSync(new URL("./recovery.ts", import.meta.url), "utf8");
-    expect(completion).toContain("await rearmIssueMonitorAfterFailedWake(db, livenessRun)");
+    expect(completion).toContain("await rearmIssueMonitorAfterFailedWake(db, livenessRun, new Date(), {");
     expect(recovery).toContain("await rearmIssueMonitorAfterFailedWake(db, finalizedRun, now)");
+    expect(completion).toContain("retryOwnsNextAttempt");
   });
 
   it("restores the monitor before release on setup failure and restart recovery", () => {
@@ -73,8 +74,9 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
     attemptCount?: number;
     maxAttempts?: number | null;
     monitorNextCheckAt?: Date | null;
+    originatingNextCheckAt?: string;
     withComment?: boolean;
-    monitorStatus?: "triggered" | "cleared";
+    monitorStatus?: "triggered" | "cleared" | "scheduled";
     executionStateExtra?: Record<string, unknown>;
   } = {}) {
     const triggeredAt = new Date("2026-10-16T00:05:15.000Z");
@@ -132,6 +134,7 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
         issueId: issue.id,
         source: "issue.monitor",
         wakeReason: overrides.wakeReason ?? "issue_monitor_due",
+        nextCheckAt: overrides.originatingNextCheckAt ?? "2026-10-16T00:05:00.000Z",
       },
     }).returning();
     if (overrides.withComment) {
@@ -226,5 +229,27 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
     const issue = await readIssue(f.issue.id);
     expect(issue.monitorNextCheckAt).toBeNull();
     expect(parseIssueExecutionState(issue.executionState)?.monitor?.status).toBe("cleared");
+  });
+
+  it("restores when consume-on-enqueue has not landed yet and the originating deadline is still set", async () => {
+    const originating = new Date("2026-10-16T00:05:00.000Z");
+    const f = await fixture({
+      monitorNextCheckAt: originating,
+      originatingNextCheckAt: originating.toISOString(),
+      monitorStatus: "scheduled",
+    });
+    const result = await rearmIssueMonitorAfterFailedWake(db, f.run, f.now);
+    expect(result.rearmed).toBe(true);
+    expect((await readIssue(f.issue.id)).monitorNextCheckAt?.toISOString()).toBe(
+      new Date(f.now.getTime() + FAILED_WAKE_MONITOR_REARM_DELAY_MS).toISOString(),
+    );
+  });
+
+  it("does not restore when a retry already owns the next attempt", async () => {
+    const f = await fixture();
+    expect(
+      await rearmIssueMonitorAfterFailedWake(db, f.run, f.now, { retryOwnsNextAttempt: true }),
+    ).toEqual({ rearmed: false });
+    expect((await readIssue(f.issue.id)).monitorNextCheckAt).toBeNull();
   });
 });
