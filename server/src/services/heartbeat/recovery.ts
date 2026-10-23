@@ -2456,8 +2456,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       }
 
       if (!retriedRun) {
-        await releaseIssueExecutionAndPromote(finalizedRun);
         await rearmIssueMonitorAfterFailedWake(db, finalizedRun, now);
+        await releaseIssueExecutionAndPromote(finalizedRun);
       }
 
       await appendRunEvent(finalizedRun, {

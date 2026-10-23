@@ -25,6 +25,25 @@ describe("failed-wake re-arm call sites", () => {
     expect(completion).toContain("await rearmIssueMonitorAfterFailedWake(db, livenessRun)");
     expect(recovery).toContain("await rearmIssueMonitorAfterFailedWake(db, finalizedRun, now)");
   });
+
+  it("restores the monitor before release on setup failure and restart recovery", () => {
+    const completion = readFileSync(new URL("./run-completion.ts", import.meta.url), "utf8");
+    const recovery = readFileSync(new URL("./recovery.ts", import.meta.url), "utf8");
+    const setupRearm = completion.indexOf("failed to re-arm issue monitor after heartbeat setup failure");
+    const setupRelease = completion.indexOf("failed to release issue execution after heartbeat setup failure");
+    expect(setupRearm).toBeGreaterThan(-1);
+    expect(setupRelease).toBeGreaterThan(-1);
+    expect(setupRearm).toBeLessThan(setupRelease);
+
+    const restartBlock = recovery.lastIndexOf("if (!retriedRun)");
+    expect(restartBlock).toBeGreaterThan(-1);
+    const slice = recovery.slice(restartBlock, restartBlock + 280);
+    expect(slice.indexOf("rearmIssueMonitorAfterFailedWake")).toBeGreaterThan(-1);
+    expect(slice.indexOf("releaseIssueExecutionAndPromote")).toBeGreaterThan(-1);
+    expect(slice.indexOf("rearmIssueMonitorAfterFailedWake")).toBeLessThan(
+      slice.indexOf("releaseIssueExecutionAndPromote"),
+    );
+  });
 });
 
 const postgres = await getEmbeddedPostgresTestSupport();

@@ -1475,6 +1475,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           );
         });
       }
+      await rearmIssueMonitorAfterFailedWake(db, livenessRun).catch((rearmError) => {
+        logger.error(
+          { err: rearmError, runId },
+          "failed to re-arm issue monitor after heartbeat setup failure",
+        );
+      });
       await releaseIssueExecutionAndPromote(livenessRun, {
         suppressImmediateRecovery:
           readNonEmptyString(
@@ -1496,12 +1502,6 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           );
         },
       );
-      await rearmIssueMonitorAfterFailedWake(db, livenessRun).catch((rearmError) => {
-        logger.error(
-          { err: rearmError, runId },
-          "failed to re-arm issue monitor after heartbeat setup failure",
-        );
-      });
     }
     // Ensure the agent is not left stuck in "running" if the setup-failure
     // path owned the terminal transition. If another path already finalized
