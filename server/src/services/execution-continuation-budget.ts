@@ -9,6 +9,7 @@ export type ContinuationMessageLike = {
 
 export type ContinuationEnvelopeLike<TMessage extends ContinuationMessageLike> = {
   objective: string;
+  trigger?: { reason?: string; interactionId?: string | null; sourceRunId?: string | null };
   messages: TMessage[];
   resumeDelta?: { baseRunId: string; messages: TMessage[] };
   coverage: {
@@ -85,6 +86,16 @@ export function boundExecutionContinuationEnvelope<
   // Keep the full objective for server checks (native completion reads this
   // snapshot). Shorten it only when the returned envelope is still over budget.
   let objective = envelope.objective;
+  const currentHumanResponseId = envelope.trigger?.interactionId ?? null;
+  const humanResponseId = (value: unknown): string | null => {
+    if (!value || typeof value !== "object") return null;
+    const id = (value as { id?: unknown }).id;
+    return typeof id === "string" ? id : null;
+  };
+  const currentHumanResponse = () =>
+    currentHumanResponseId
+      ? humanResponses?.find((response) => humanResponseId(response) === currentHumanResponseId) ?? null
+      : null;
 
   const wasTruncated = () =>
     omittedCount > 0 ||
@@ -185,9 +196,19 @@ export function boundExecutionContinuationEnvelope<
       return true;
     }
     if (humanResponses && humanResponses.length > 0) {
-      humanResponses = [];
-      sidecarsTrimmed = true;
-      return true;
+      const kept = currentHumanResponse();
+      // Drop accumulated answers first. Keep the wake-causing answer so
+      // runtime-selection can still find currentHumanResponseId.
+      if (kept && humanResponses.length > 1) {
+        humanResponses = [kept];
+        sidecarsTrimmed = true;
+        return true;
+      }
+      if (!kept) {
+        humanResponses = [];
+        sidecarsTrimmed = true;
+        return true;
+      }
     }
     if (interactionOutcomes && interactionOutcomes.length > 0) {
       interactionOutcomes = [];
@@ -252,6 +273,11 @@ export function boundExecutionContinuationEnvelope<
     }
     if (unresolvedInteractionIds && unresolvedInteractionIds.length > 0) {
       unresolvedInteractionIds = [];
+      sidecarsTrimmed = true;
+      return true;
+    }
+    if (humanResponses && humanResponses.length > 0) {
+      humanResponses = [];
       sidecarsTrimmed = true;
       return true;
     }

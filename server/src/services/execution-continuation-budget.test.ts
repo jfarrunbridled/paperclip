@@ -382,4 +382,55 @@ describe("execution continuation budget", () => {
     expect(bounded.coverage.omittedCount).toBeGreaterThan(0);
     expect(bounded.messages.map((message) => message.id)).toContain("origin");
   });
+
+  it("keeps the wake-causing human answer when accumulated answers overflow", () => {
+    const origin = continuationMessage("origin", "trigger");
+    const currentId = "40416c31-0000-4000-8000-000000000001";
+    const currentAnswer = {
+      id: currentId,
+      kind: "ask_user_questions",
+      status: "answered",
+      resolvedByUserId: "user",
+      resolvedAt: "2026-10-16T10:15:00.000Z",
+      result: { answer: "Apply the Giftd certificate." },
+    };
+    const oldAnswer = {
+      id: "old-answer",
+      kind: "ask_user_questions",
+      status: "answered",
+      resolvedByUserId: "user",
+      resolvedAt: "2026-10-15T00:00:00.000Z",
+      result: { blob: "a".repeat(4_000) },
+    };
+    const envelope = {
+      version: 1 as const,
+      companyId: "company",
+      issueId: "issue",
+      trigger: { reason: "issue_commented", interactionId: currentId, sourceRunId: null },
+      originCommentIds: ["origin"],
+      objective: "Do the work.",
+      messages: [origin],
+      humanResponses: [oldAnswer, currentAnswer],
+      interactionOutcomes: [],
+      completedWork: null,
+      unresolvedInteractionIds: [],
+      coverage: {
+        kind: "full_task_history" as const,
+        throughCommentId: "origin",
+        summaryThroughCommentId: null,
+      },
+    };
+    const currentOnly = {
+      ...envelope,
+      humanResponses: [currentAnswer],
+    };
+    expect(envelopeBytes(envelope)).toBeGreaterThan(1_200);
+    expect(envelopeBytes(currentOnly)).toBeLessThanOrEqual(1_200);
+    const bounded = boundExecutionContinuationEnvelope(envelope, ["origin"], 1_200);
+    expect(envelopeBytes(bounded)).toBeLessThanOrEqual(1_200);
+    expect(bounded.coverage.kind).toBe("truncated_task_history");
+    expect(bounded.humanResponses).toEqual([currentAnswer]);
+    expect(bounded.objective).toBe("Do the work.");
+    expect(bounded.messages.map((message) => message.id)).toEqual(["origin"]);
+  });
 });
