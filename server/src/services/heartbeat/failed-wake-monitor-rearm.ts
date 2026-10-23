@@ -157,6 +157,7 @@ export async function rearmIssueMonitorAfterFailedWake(
       policy,
       nextCheckAt,
       originatingNextCheckAt,
+      now,
     });
     if (!patch) return { rearmed: false };
 

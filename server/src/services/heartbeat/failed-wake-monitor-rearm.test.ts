@@ -275,4 +275,29 @@ describe.skipIf(!postgres.supported)("failed-wake issue monitor re-arm", () => {
     ).toEqual({ rearmed: false });
     expect((await readIssue(f.issue.id)).monitorNextCheckAt).toBeNull();
   });
+
+  it("clamps restore to timeoutAt so timeout recovery still has a deadline", async () => {
+    const f = await fixture();
+    const timeoutAt = new Date(f.now.getTime() + 30_000);
+    await db
+      .update(issues)
+      .set({
+        executionState: {
+          ...(parseIssueExecutionState(f.issue.executionState) as Record<string, unknown>),
+          monitor: {
+            ...parseIssueExecutionState(f.issue.executionState)!.monitor,
+            timeoutAt: timeoutAt.toISOString(),
+          },
+        },
+      })
+      .where(eq(issues.id, f.issue.id));
+    const result = await rearmIssueMonitorAfterFailedWake(db, f.run, f.now);
+    expect(result.rearmed).toBe(true);
+    const issue = await readIssue(f.issue.id);
+    expect(issue.monitorNextCheckAt?.toISOString()).toBe(timeoutAt.toISOString());
+    expect(parseIssueExecutionState(issue.executionState)?.monitor).toMatchObject({
+      status: "scheduled",
+      timeoutAt: timeoutAt.toISOString(),
+    });
+  });
 });

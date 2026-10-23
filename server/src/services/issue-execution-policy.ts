@@ -1245,11 +1245,23 @@ export function shouldRearmIssueMonitorAfterFailedWake(input: {
   return true;
 }
 
+function clampFailedWakeRearmDeadline(input: {
+  now: Date;
+  nextCheckAt: Date;
+  timeoutAt?: string | null;
+}) {
+  const timeoutAt = parseMonitorDate(input.timeoutAt ?? null);
+  if (!timeoutAt) return input.nextCheckAt;
+  if (input.now.getTime() >= timeoutAt.getTime()) return input.nextCheckAt;
+  return input.nextCheckAt.getTime() > timeoutAt.getTime() ? timeoutAt : input.nextCheckAt;
+}
+
 export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
   issue: IssueLike;
   policy: IssueExecutionPolicy | null;
   nextCheckAt: Date;
   originatingNextCheckAt?: Date | string | null;
+  now?: Date;
 }) {
   const existingState = parseIssueExecutionState(input.issue.executionState);
   const currentMonitorState = derivePersistedMonitorState({
@@ -1259,6 +1271,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
   });
   if (!currentMonitorState) return null;
   const originatingNextCheckAt = input.originatingNextCheckAt ?? null;
+  const now = input.now ?? new Date();
   if (
     !shouldRearmIssueMonitorAfterFailedWake({
       runStatus: "failed",
@@ -1273,7 +1286,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
       maxAttempts: currentMonitorState.maxAttempts ?? null,
       timeoutAt: currentMonitorState.timeoutAt ?? null,
       postedComment: false,
-      now: input.nextCheckAt,
+      now,
     })
   ) {
     return null;
@@ -1288,9 +1301,14 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
   const previousMonitorState = unconsumedOriginatingDeadline
     ? { ...currentMonitorState, attemptCount: spentAttemptCount }
     : currentMonitorState;
+  const restoredAt = clampFailedWakeRearmDeadline({
+    now,
+    nextCheckAt: input.nextCheckAt,
+    timeoutAt: currentMonitorState.timeoutAt ?? null,
+  });
 
   const restoredMonitor: IssueExecutionMonitorPolicy = {
-    nextCheckAt: input.nextCheckAt.toISOString(),
+    nextCheckAt: restoredAt.toISOString(),
     notes: currentMonitorState.notes ?? null,
     scheduledBy: currentMonitorState.scheduledBy === "board" ? "board" : "assignee",
     kind: currentMonitorState.kind ?? null,
@@ -1308,7 +1326,7 @@ export function buildIssueMonitorRearmedAfterFailedWakePatch(input: {
   return {
     executionPolicy: nextPolicy as Record<string, unknown> | null,
     executionState: executionStateWithMonitor(existingState, nextMonitorState) as Record<string, unknown> | null,
-    monitorNextCheckAt: input.nextCheckAt,
+    monitorNextCheckAt: restoredAt,
     monitorWakeRequestedAt: null,
     monitorAttemptCount: spentAttemptCount,
     monitorNotes: nextMonitorState.notes,

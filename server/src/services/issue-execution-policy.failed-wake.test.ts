@@ -286,4 +286,87 @@ describe("failed-wake monitor re-arm helpers", () => {
     });
     expect(rearmed).toBeNull();
   });
+
+  it("restores a deadline at timeoutAt when the 60s delay would miss timeout recovery", () => {
+    const now = new Date("2026-10-16T00:13:43.000Z");
+    const timeoutAt = new Date(now.getTime() + 30_000);
+    const nextCheckAt = new Date(now.getTime() + FAILED_WAKE_MONITOR_REARM_DELAY_MS);
+    const issue = {
+      status: "in_progress",
+      assigneeAgentId: agentId,
+      assigneeUserId: null,
+      executionPolicy: null,
+      executionState: {
+        status: "idle",
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+        returnAssignee: null,
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+        monitor: {
+          status: "triggered",
+          nextCheckAt: null,
+          lastTriggeredAt: now.toISOString(),
+          attemptCount: 1,
+          notes: "Check deployment",
+          scheduledBy: "assignee",
+          maxAttempts: 4,
+          timeoutAt: timeoutAt.toISOString(),
+          clearedAt: null,
+          clearReason: null,
+        },
+      },
+      monitorAttemptCount: 1,
+      monitorNextCheckAt: null,
+      monitorLastTriggeredAt: now,
+      monitorNotes: "Check deployment",
+      monitorScheduledBy: "assignee",
+    };
+    expect(
+      shouldRearmIssueMonitorAfterFailedWake({
+        runStatus: "failed",
+        wakeReason: "issue_monitor_due",
+        issueStatus: "in_progress",
+        assigneeAgentId: agentId,
+        assigneeUserId: null,
+        monitorStatus: "triggered",
+        monitorNextCheckAt: null,
+        attemptCount: 1,
+        maxAttempts: 4,
+        timeoutAt: timeoutAt.toISOString(),
+        postedComment: false,
+        now,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRearmIssueMonitorAfterFailedWake({
+        runStatus: "failed",
+        wakeReason: "issue_monitor_due",
+        issueStatus: "in_progress",
+        assigneeAgentId: agentId,
+        assigneeUserId: null,
+        monitorStatus: "triggered",
+        monitorNextCheckAt: null,
+        attemptCount: 1,
+        maxAttempts: 4,
+        timeoutAt: timeoutAt.toISOString(),
+        postedComment: false,
+        now: nextCheckAt,
+      }),
+    ).toBe(false);
+
+    const restored = buildIssueMonitorRearmedAfterFailedWakePatch({
+      issue,
+      policy: null,
+      nextCheckAt,
+      now,
+    })!;
+    expect(restored.monitorNextCheckAt).toEqual(timeoutAt);
+    expect(restored.executionState).toMatchObject({
+      monitor: { status: "scheduled", attemptCount: 1, timeoutAt: timeoutAt.toISOString() },
+    });
+  });
 });
